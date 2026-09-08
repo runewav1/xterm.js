@@ -1,5 +1,6 @@
 {
   "compilerOptions": {
+    "skipLibCheck": true,
     "lib": ["dom", "es6"],
     "rootDir": "..",
     "outDir": "../out-benchmark",

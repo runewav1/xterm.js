@@ -1,0 +1,20 @@
+{
+  "name": "@partty/addon-webgpu",
+  "version": "0.1.0",
+  "description": "Experimental WebGPU renderer for the ParTTY xterm.js fork",
+  "main": "lib/addon-webgpu.mjs",
+  "module": "lib/addon-webgpu.mjs",
+  "types": "typings/addon-webgpu.d.ts",
+  "files": ["lib", "typings", "README.md"],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -b .",
+    "prepackage": "pnpm run build",
+    "package": "node ../../bin/esbuild.mjs --addon=webgpu --prod",
+    "prepublishOnly": "pnpm run package",
+    "start": "node ../../demo/start"
+  }
+}

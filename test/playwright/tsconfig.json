@@ -16,6 +16,7 @@
     "strict": true,
     "noImplicitAny": false,
     "declaration": true,
+    "skipLibCheck": true,
     "moduleResolution": "nodenext",
     "target": "ESNext",
     "module": "nodenext",

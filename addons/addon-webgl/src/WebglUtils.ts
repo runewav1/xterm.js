@@ -44,15 +44,6 @@ export function createShader(gl: WebGLRenderingContext, type: number, source: st
   gl.deleteShader(shader);
 }
 
-export function expandFloat32Array(source: Float32Array, max: number): Float32Array {
-  const newLength = Math.min(source.length * 2, max);
-  const newArray = new Float32Array(newLength);
-  for (let i = 0; i < source.length; i++) {
-    newArray[i] = source[i];
-  }
-  return newArray;
-}
-
 export class GLTexture {
   public texture: WebGLTexture;
   public version: number;

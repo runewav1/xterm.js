@@ -38,7 +38,7 @@
       "@xterm/addon-web-links": [
         "../../addons/addon-web-links"
       ],
-      "@xterm/addon-webgl": [
+      "@partty/addon-webgl": [
         "../../addons/addon-webgl"
       ],
       "@xterm/addon-unicode11": [

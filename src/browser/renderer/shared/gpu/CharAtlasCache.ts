@@ -5,17 +5,15 @@
 
 import { TextureAtlas } from './TextureAtlas';
 import { ITerminalOptions, Terminal } from '@xterm/xterm';
-import { ITerminal, ReadonlyColorSet } from 'browser/Types';
+import { ITerminal, ReadonlyColorSet } from '../../../Types';
 import { ICharAtlasConfig, ITextureAtlas } from './Types';
 import { generateConfig, configEquals } from './CharAtlasUtils';
-import type { ILogService } from 'common/services/Services';
+import type { ILogService } from '../../../../common/services/Services';
 
 interface ITextureAtlasCacheEntry {
   atlas: ITextureAtlas;
   config: ICharAtlasConfig;
-  // N.B. This implementation potentially holds onto copies of the terminal forever, so
-  // this may cause memory leaks.
-  ownedBy: Terminal[];
+  ownedBy: object[];
 }
 
 const charAtlasCache: ITextureAtlasCacheEntry[] = [];
@@ -26,6 +24,7 @@ const charAtlasCache: ITextureAtlasCacheEntry[] = [];
  */
 export function acquireTextureAtlas(
   terminal: Terminal,
+  owner: object,
   options: Required<ITerminalOptions>,
   colors: ReadonlyColorSet,
   deviceCellWidth: number,
@@ -33,20 +32,21 @@ export function acquireTextureAtlas(
   deviceCharWidth: number,
   deviceCharHeight: number,
   devicePixelRatio: number,
-  deviceMaxTextureSize: number,
+  maxTextureSize: number,
+  maxAtlasPages: number,
   customGlyphs: boolean = true
 ): ITextureAtlas {
-  const newConfig = generateConfig(deviceCellWidth, deviceCellHeight, deviceCharWidth, deviceCharHeight, options, colors, devicePixelRatio, deviceMaxTextureSize, customGlyphs);
+  const newConfig = generateConfig(deviceCellWidth, deviceCellHeight, deviceCharWidth, deviceCharHeight, options, colors, devicePixelRatio, maxTextureSize, maxAtlasPages, customGlyphs);
 
-  // Check to see if the terminal already owns this config
+  // Ownership is renderer-scoped: a replacement is constructed before the old renderer is disposed.
   for (let i = 0; i < charAtlasCache.length; i++) {
     const entry = charAtlasCache[i];
-    const ownedByIndex = entry.ownedBy.indexOf(terminal);
+    const ownedByIndex = entry.ownedBy.indexOf(owner);
     if (ownedByIndex >= 0) {
       if (configEquals(entry.config, newConfig)) {
         return entry.atlas;
       }
-      // The configs differ, release the terminal from the entry
+      // The configs differ, release this owner from the entry
       if (entry.ownedBy.length === 1) {
         entry.atlas.dispose();
         charAtlasCache.splice(i, 1);
@@ -61,8 +61,7 @@ export function acquireTextureAtlas(
   for (let i = 0; i < charAtlasCache.length; i++) {
     const entry = charAtlasCache[i];
     if (configEquals(entry.config, newConfig)) {
-      // Add the terminal to the cache entry and return
-      entry.ownedBy.push(terminal);
+      entry.ownedBy.push(owner);
       return entry.atlas;
     }
   }
@@ -70,21 +69,20 @@ export function acquireTextureAtlas(
   const core: ITerminal = (terminal as any)._core;
   const logService = (core as any)._logService as ILogService;
   const newEntry: ITextureAtlasCacheEntry = {
-    atlas: new TextureAtlas(document, newConfig, core.unicodeService, logService),
+    atlas: new TextureAtlas(terminal.element!.ownerDocument, newConfig, core.unicodeService, logService),
     config: newConfig,
-    ownedBy: [terminal]
+    ownedBy: [owner]
   };
   charAtlasCache.push(newEntry);
   return newEntry.atlas;
 }
 
 /**
- * Removes a terminal reference from the cache, allowing its memory to be freed.
- * @param terminal The terminal to remove.
+ * Releases an owner's atlas, disposing it when the last renderer releases it.
  */
-export function removeTerminalFromCache(terminal: Terminal): void {
+export function releaseTextureAtlas(owner: object): void {
   for (let i = 0; i < charAtlasCache.length; i++) {
-    const index = charAtlasCache[i].ownedBy.indexOf(terminal);
+    const index = charAtlasCache[i].ownedBy.indexOf(owner);
     if (index !== -1) {
       if (charAtlasCache[i].ownedBy.length === 1) {
         // Remove the cache entry if it's the only terminal

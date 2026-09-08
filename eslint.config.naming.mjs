@@ -57,7 +57,7 @@ export default tseslint.config(
     }
   },
   {
-    files: ['typings/**/*.d.ts'],
+    files: ['typings/**/*.d.ts', 'addons/**/typings/**/*.d.ts'],
     plugins: {
       '@typescript-eslint': tseslint.plugin
     },

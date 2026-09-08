@@ -2,18 +2,17 @@
  * Copyright (c) 2018 The xterm.js authors. All rights reserved.
  * @license MIT
  */
-import { TextureAtlas } from './TextureAtlas';
+import { GlyphRenderModel, GlyphRenderModelConstants } from 'browser/renderer/shared/gpu/GlyphRenderModel';
 import { IRenderDimensions } from 'browser/renderer/shared/Types';
-import { NULL_CELL_CODE } from 'common/buffer/Constants';
 import { Disposable, toDisposable } from 'common/Lifecycle';
 import { Terminal } from '@xterm/xterm';
-import { IRenderModel, IWebGL2RenderingContext, IWebGLVertexArrayObject, type IRasterizedGlyph, type ITextureAtlas } from './Types';
+import { IWebGL2RenderingContext, IWebGLVertexArrayObject } from './Types';
+import { IGlyphRenderer, IRenderModel, ITextureAtlas } from 'browser/renderer/shared/gpu/Types';
 import { createProgram, GLTexture, PROJECTION_MATRIX } from './WebglUtils';
 import type { ILogService, IOptionsService } from 'common/services/Services';
-import { allowRescaling, throwIfFalsy } from 'browser/renderer/shared/RendererUtils';
+import { throwIfFalsy } from 'browser/renderer/shared/RendererUtils';
 
 interface IVertices {
-  attributes: Float32Array;
   /**
    * These buffers are the ones used to bind to WebGL, the reason there are
    * multiple is to allow double buffering to work as you cannot modify the
@@ -79,18 +78,11 @@ void main() {
 }
 
 const enum Constants {
-  INDICES_PER_CELL = 11,
+  INDICES_PER_CELL = GlyphRenderModelConstants.INDICES_PER_CELL,
   BYTES_PER_CELL = INDICES_PER_CELL * 4/* Float32Array.BYTES_PER_ELEMENT */,
-  CELL_POSITION_INDICES = 2
 }
 
-// Work variables to avoid garbage collection
-let $i = 0;
-let $glyph: IRasterizedGlyph | undefined = undefined;
-let $leftCellPadding = 0;
-let $clippedPixels = 0;
-
-export class GlyphRenderer extends Disposable {
+export class GlyphRenderer extends Disposable implements IGlyphRenderer {
   private readonly _program: WebGLProgram;
   private readonly _vertexArrayObject: IWebGLVertexArrayObject;
   private readonly _projectionLocation: WebGLUniformLocation;
@@ -99,13 +91,11 @@ export class GlyphRenderer extends Disposable {
   private readonly _atlasTextures: GLTexture[];
   private readonly _attributesBuffer: WebGLBuffer;
 
-  private _atlas: ITextureAtlas | undefined;
-  private _lastSeenPageLayoutVersion: number = -1;
+  private readonly _model: GlyphRenderModel;
   private _pageOverflowWarned: boolean = false;
   private _activeBuffer: number = 0;
   private readonly _vertices: IVertices = {
     count: 0,
-    attributes: new Float32Array(0),
     attributesBuffers: [
       new Float32Array(0),
       new Float32Array(0)
@@ -116,21 +106,17 @@ export class GlyphRenderer extends Disposable {
     private readonly _terminal: Terminal,
     private readonly _gl: IWebGL2RenderingContext,
     private _dimensions: IRenderDimensions,
-    private readonly _optionsService: IOptionsService,
+    optionsService: IOptionsService,
     private readonly _logService: ILogService
   ) {
     super();
+    this._model = new GlyphRenderModel(_terminal, _dimensions, optionsService);
 
     const gl = this._gl;
 
-    if (TextureAtlas.maxAtlasPages === undefined) {
-      // Typically 8 or 16
-      TextureAtlas.maxAtlasPages = Math.min(32, throwIfFalsy(gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS) as number | null));
-      // Almost all clients will support >= 4096
-      TextureAtlas.maxTextureSize = throwIfFalsy(gl.getParameter(gl.MAX_TEXTURE_SIZE) as number | null);
-    }
+    const maxAtlasPages = Math.min(32, throwIfFalsy(gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS) as number | null));
 
-    this._program = throwIfFalsy(createProgram(gl, vertexShaderSource, createFragmentShaderSource(TextureAtlas.maxAtlasPages), this._logService));
+    this._program = throwIfFalsy(createProgram(gl, vertexShaderSource, createFragmentShaderSource(maxAtlasPages), this._logService));
     this._register(toDisposable(() => gl.deleteProgram(this._program)));
 
     // Uniform locations
@@ -186,8 +172,8 @@ export class GlyphRenderer extends Disposable {
 
     // Setup static uniforms
     gl.useProgram(this._program);
-    const textureUnits = new Int32Array(TextureAtlas.maxAtlasPages);
-    for (let i = 0; i < TextureAtlas.maxAtlasPages; i++) {
+    const textureUnits = new Int32Array(maxAtlasPages);
+    for (let i = 0; i < maxAtlasPages; i++) {
       textureUnits[i] = i;
     }
     gl.uniform1iv(this._textureLocation, textureUnits);
@@ -196,7 +182,7 @@ export class GlyphRenderer extends Disposable {
     // Setup 1x1 red pixel textures for all potential atlas pages, if one of these invalid textures
     // is ever drawn it will show characters as red rectangles.
     this._atlasTextures = [];
-    for (let i = 0; i < TextureAtlas.maxAtlasPages; i++) {
+    for (let i = 0; i < maxAtlasPages; i++) {
       const glTexture = new GLTexture(throwIfFalsy(gl.createTexture()));
       this._register(toDisposable(() => gl.deleteTexture(glTexture.texture)));
       gl.activeTexture(gl.TEXTURE0 + i);
@@ -220,101 +206,17 @@ export class GlyphRenderer extends Disposable {
    * rendering this frame because the atlas page layout changed since this renderer last drew.
    */
   public beginFrame(): boolean {
-    if (!this._atlas) {
-      return true;
-    }
-    if (this._atlas.pageLayoutVersion !== this._lastSeenPageLayoutVersion) {
-      this._lastSeenPageLayoutVersion = this._atlas.pageLayoutVersion;
-      return true;
-    }
-    return false;
+    return this._model.beginFrame();
   }
 
   public updateCell(x: number, y: number, code: number, bg: number, fg: number, ext: number, chars: string, width: number, lastBg: number): void {
-    // Since this function is called for every cell (`rows*cols`), it must be very optimized. It
-    // should not instantiate any variables unless a new glyph is drawn to the cache where the
-    // slight slowdown is acceptable for the developer ergonomics provided as it's a one-off for
-    // each glyph.
-    this._updateCell(this._vertices.attributes, x, y, code, bg, fg, ext, chars, width, lastBg);
-  }
-
-  private _updateCell(array: Float32Array, x: number, y: number, code: number | undefined, bg: number, fg: number, ext: number, chars: string, width: number, lastBg: number): void {
-    $i = (y * this._terminal.cols + x) * Constants.INDICES_PER_CELL;
-
-    // Exit early if this is a null character, allow space character to continue as it may have
-    // underline/strikethrough styles
-    if (code === NULL_CELL_CODE || code === undefined/* This is used for the right side of wide chars */) {
-      array.fill(0, $i, $i + Constants.INDICES_PER_CELL - 1 - Constants.CELL_POSITION_INDICES);
-      return;
-    }
-
-    if (!this._atlas) {
-      return;
-    }
-
-    // Get the glyph
-    if (chars && chars.length > 1) {
-      $glyph = this._atlas.getRasterizedGlyphCombinedChar(chars, bg, fg, ext, false, this._terminal.element);
-    } else {
-      $glyph = this._atlas.getRasterizedGlyph(code, bg, fg, ext, false, this._terminal.element);
-    }
-
-    $leftCellPadding = Math.floor((this._dimensions.device.cell.width - this._dimensions.device.char.width) / 2);
-    if (bg !== lastBg && $glyph.offset.x > $leftCellPadding) {
-      $clippedPixels = $glyph.offset.x - $leftCellPadding;
-      // a_origin
-      array[$i    ] = -($glyph.offset.x - $clippedPixels) + this._dimensions.device.char.left;
-      array[$i + 1] = -$glyph.offset.y + this._dimensions.device.char.top;
-      // a_size
-      array[$i + 2] = ($glyph.size.x - $clippedPixels) / this._dimensions.device.canvas.width;
-      array[$i + 3] = $glyph.size.y / this._dimensions.device.canvas.height;
-      // a_texpage
-      array[$i + 4] = $glyph.texturePage;
-      // a_texcoord
-      array[$i + 5] = $glyph.texturePositionClipSpace.x + $clippedPixels / this._atlas.pages[$glyph.texturePage].canvas.width;
-      array[$i + 6] = $glyph.texturePositionClipSpace.y;
-      // a_texsize
-      array[$i + 7] = $glyph.sizeClipSpace.x - $clippedPixels / this._atlas.pages[$glyph.texturePage].canvas.width;
-      array[$i + 8] = $glyph.sizeClipSpace.y;
-    } else {
-      // a_origin
-      array[$i    ] = -$glyph.offset.x + this._dimensions.device.char.left;
-      array[$i + 1] = -$glyph.offset.y + this._dimensions.device.char.top;
-      // a_size
-      array[$i + 2] = $glyph.size.x / this._dimensions.device.canvas.width;
-      array[$i + 3] = $glyph.size.y / this._dimensions.device.canvas.height;
-      // a_texpage
-      array[$i + 4] = $glyph.texturePage;
-      // a_texcoord
-      array[$i + 5] = $glyph.texturePositionClipSpace.x;
-      array[$i + 6] = $glyph.texturePositionClipSpace.y;
-      // a_texsize
-      array[$i + 7] = $glyph.sizeClipSpace.x;
-      array[$i + 8] = $glyph.sizeClipSpace.y;
-    }
-    // a_cellpos only changes on resize
-
-    // Reduce scale horizontally for wide glyphs printed in cells that would overlap with the
-    // following cell (ie. the width is not 2).
-    if (this._optionsService.rawOptions.rescaleOverlappingGlyphs) {
-      if (allowRescaling(code, width, $glyph.size.x, this._dimensions.device.cell.width)) {
-        array[$i + 2] = (this._dimensions.device.cell.width - 1) / this._dimensions.device.canvas.width; // - 1 to improve readability
-      }
-    }
+    this._model.updateCell(x, y, code, bg, fg, ext, chars, width, lastBg);
   }
 
   public clear(): void {
-    const terminal = this._terminal;
-    const newCount = terminal.cols * terminal.rows * Constants.INDICES_PER_CELL;
-
-    // Clear vertices
-    if (this._vertices.count !== newCount) {
-      this._vertices.attributes = new Float32Array(newCount);
-    } else {
-      this._vertices.attributes.fill(0);
-    }
-    let i = 0;
-    for (; i < this._vertices.attributesBuffers.length; i++) {
+    this._model.clear();
+    const newCount = this._model.attributes.length;
+    for (let i = 0; i < this._vertices.attributesBuffers.length; i++) {
       if (this._vertices.count !== newCount) {
         this._vertices.attributesBuffers[i] = new Float32Array(newCount);
       } else {
@@ -322,14 +224,6 @@ export class GlyphRenderer extends Disposable {
       }
     }
     this._vertices.count = newCount;
-    i = 0;
-    for (let y = 0; y < terminal.rows; y++) {
-      for (let x = 0; x < terminal.cols; x++) {
-        this._vertices.attributes[i + 9] = x / terminal.cols;
-        this._vertices.attributes[i + 10] = y / terminal.rows;
-        i += Constants.INDICES_PER_CELL;
-      }
-    }
   }
 
   public handleResize(): void {
@@ -341,7 +235,8 @@ export class GlyphRenderer extends Disposable {
   }
 
   public render(renderModel: IRenderModel): void {
-    if (!this._atlas) {
+    const atlas = this._model.atlas;
+    if (!atlas) {
       return;
     }
 
@@ -364,7 +259,7 @@ export class GlyphRenderer extends Disposable {
     let bufferLength = 0;
     for (let y = 0; y < renderModel.lineLengths.length; y++) {
       const si = y * this._terminal.cols * Constants.INDICES_PER_CELL;
-      const sub = this._vertices.attributes.subarray(si, si + renderModel.lineLengths[y] * Constants.INDICES_PER_CELL);
+      const sub = this._model.attributes.subarray(si, si + renderModel.lineLengths[y] * Constants.INDICES_PER_CELL);
       activeBuffer.set(sub, bufferLength);
       bufferLength += sub.length;
     }
@@ -377,14 +272,14 @@ export class GlyphRenderer extends Disposable {
     // monotonic, so a page object swap at the same index (which happens after a page merge)
     // is detected by the same comparison.
     // Clamp defensively in case the atlas unexpectedly exceeds texture capacity.
-    const pageCount = Math.min(this._atlas.pages.length, this._atlasTextures.length);
-    if (this._atlas.pages.length > this._atlasTextures.length && !this._pageOverflowWarned) {
+    const pageCount = Math.min(atlas.pages.length, this._atlasTextures.length);
+    if (atlas.pages.length > this._atlasTextures.length && !this._pageOverflowWarned) {
       this._pageOverflowWarned = true;
-      this._logService.warn(`Atlas page count (${this._atlas.pages.length}) exceeds the renderer's texture capacity (${this._atlasTextures.length}), some glyphs will not render correctly`);
+      this._logService.warn(`Atlas page count (${atlas.pages.length}) exceeds the renderer's texture capacity (${this._atlasTextures.length}), some glyphs will not render correctly`);
     }
     for (let i = 0; i < pageCount; i++) {
-      if (this._atlas.pages[i].version !== this._atlasTextures[i].version) {
-        this._bindAtlasPageTexture(gl, this._atlas, i);
+      if (atlas.pages[i].version !== this._atlasTextures[i].version) {
+        this._bindAtlasPageTexture(gl, atlas, i);
       }
     }
 
@@ -393,8 +288,7 @@ export class GlyphRenderer extends Disposable {
   }
 
   public setAtlas(atlas: ITextureAtlas): void {
-    this._atlas = atlas;
-    this._lastSeenPageLayoutVersion = -1;
+    this._model.setAtlas(atlas);
     this.invalidateAtlasTextures();
   }
 
@@ -417,5 +311,6 @@ export class GlyphRenderer extends Disposable {
 
   public setDimensions(dimensions: IRenderDimensions): void {
     this._dimensions = dimensions;
+    this._model.setDimensions(dimensions);
   }
 }

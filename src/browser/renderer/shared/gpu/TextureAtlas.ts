@@ -3,19 +3,19 @@
  * @license MIT
  */
 
-import { IColorContrastCache } from 'browser/Types';
+import { IColorContrastCache } from '../../../Types';
 import { DIM_OPACITY, TEXT_BASELINE } from './Constants';
 import { tryDrawCustomGlyph } from './customGlyphs/CustomGlyphRasterizer';
-import { computeNextVariantOffset, treatGlyphAsBackgroundColor, isPowerlineGlyph, isRestrictedPowerlineGlyph, throwIfFalsy } from 'browser/renderer/shared/RendererUtils';
+import { computeNextVariantOffset, treatGlyphAsBackgroundColor, isPowerlineGlyph, isRestrictedPowerlineGlyph, throwIfFalsy } from '../RendererUtils';
 import { IBoundingBox, ICharAtlasConfig, IRasterizedGlyph, ITextureAtlas } from './Types';
-import { NULL_COLOR, channels, color, rgba } from 'common/Color';
-import { FourKeyMap } from 'common/MultiKeyMap';
-import { IdleTaskQueue } from 'common/TaskQueue';
-import { IColor } from 'common/Types';
-import { AttributeData } from 'common/buffer/AttributeData';
-import { Attributes, DEFAULT_COLOR, DEFAULT_EXT, UnderlineStyle } from 'common/buffer/Constants';
-import { ILogService, IUnicodeService } from 'common/services/Services';
-import { Emitter } from 'common/Event';
+import { NULL_COLOR, channels, color, rgba } from '../../../../common/Color';
+import { FourKeyMap } from '../../../../common/MultiKeyMap';
+import { IdleTaskQueue } from '../../../../common/TaskQueue';
+import { IColor } from '../../../../common/Types';
+import { AttributeData } from '../../../../common/buffer/AttributeData';
+import { Attributes, DEFAULT_COLOR, DEFAULT_EXT, UnderlineStyle } from '../../../../common/buffer/Constants';
+import { ILogService, IUnicodeService } from '../../../../common/services/Services';
+import { Emitter } from '../../../../common/Event';
 
 /**
  * A shared object which is used to draw nothing for a particular cell.
@@ -77,9 +77,6 @@ export class TextureAtlas implements ITextureAtlas {
 
   private _textureSize: number = 512;
 
-  public static maxAtlasPages: number | undefined;
-  public static maxTextureSize: number | undefined;
-
   private readonly _onAddTextureAtlasCanvas = new Emitter<HTMLCanvasElement>();
   public readonly onAddTextureAtlasCanvas = this._onAddTextureAtlasCanvas.event;
   private readonly _onRemoveTextureAtlasCanvas = new Emitter<HTMLCanvasElement>();
@@ -91,6 +88,7 @@ export class TextureAtlas implements ITextureAtlas {
     private readonly _unicodeService: IUnicodeService,
     private readonly _logService: ILogService
   ) {
+    this._textureSize = Math.min(this._textureSize, this._config.maxTextureSize);
     this._createNewPage();
     this._tmpCanvas = createCanvas(
       _document,
@@ -157,11 +155,11 @@ export class TextureAtlas implements ITextureAtlas {
     // microtask to ensure it does not interrupt textures that will be rendered in the current
     // animation frame which would result in blank rendered areas. This is actually not that
     // expensive relative to drawing the glyphs, so there is no need to wait for an idle callback.
-    if (TextureAtlas.maxAtlasPages && this._pages.length >= Math.max(4, TextureAtlas.maxAtlasPages)) {
+    if (this._pages.length >= this._config.maxAtlasPages) {
       // Find the set of the largest 4 images, below the maximum size, with the highest
       // percentages used
       const pagesBySize = this._pages.filter(e => {
-        return e.canvas.width * 2 <= (TextureAtlas.maxTextureSize || Constants.FORCED_MAX_TEXTURE_SIZE);
+        return e.canvas.width * 2 <= this._config.maxTextureSize;
       }).sort((a, b) => {
         if (b.canvas.width !== a.canvas.width) {
           return b.canvas.width - a.canvas.width;
@@ -482,7 +480,7 @@ export class TextureAtlas implements ITextureAtlas {
     // Allow 1 cell width per character, with a minimum of 2 (CJK), plus some padding. This is used
     // to draw the glyph to the canvas as well as to restrict the bounding box search to ensure
     // giant ligatures (eg. =====>) don't impact overall performance.
-    const allowedWidth = Math.min(this._config.deviceCellWidth * Math.max(chars.length, 2) + TMP_CANVAS_GLYPH_PADDING * 2, this._config.deviceMaxTextureSize);
+    const allowedWidth = Math.min(this._config.deviceCellWidth * Math.max(chars.length, 2) + TMP_CANVAS_GLYPH_PADDING * 2, this._config.maxTextureSize);
     if (this._tmpCanvas.width < allowedWidth) {
       this._tmpCanvas.width = allowedWidth;
     }
@@ -836,10 +834,10 @@ export class TextureAtlas implements ITextureAtlas {
       if (rasterizedGlyph.size.x > this._textureSize) {
         if (!this._overflowSizePage) {
           // Make room for the oversized page without exceeding texture capacity.
-          if (TextureAtlas.maxAtlasPages && this._pages.length >= TextureAtlas.maxAtlasPages) {
+          if (this._pages.length >= this._config.maxAtlasPages) {
             this._evictAllPages();
           }
-          this._overflowSizePage = new AtlasPage(this._document, this._config.deviceMaxTextureSize);
+          this._overflowSizePage = new AtlasPage(this._document, this._config.maxTextureSize);
           this.pages.push(this._overflowSizePage);
 
           // Invalidate renderer models so all texture pages are refreshed.
@@ -882,8 +880,7 @@ export class TextureAtlas implements ITextureAtlas {
             // improve texture utilization by using the available space before the page is merged
             // and becomes static.
             if (
-              TextureAtlas.maxAtlasPages &&
-              this._pages.length >= TextureAtlas.maxAtlasPages &&
+              this._pages.length >= this._config.maxAtlasPages &&
               activeRow.y + rasterizedGlyph.size.y <= activePage.canvas.height &&
               activeRow.height >= rasterizedGlyph.size.y &&
               activeRow.x + rasterizedGlyph.size.x <= activePage.canvas.width

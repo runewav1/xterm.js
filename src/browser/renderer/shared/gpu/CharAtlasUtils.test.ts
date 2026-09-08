@@ -6,8 +6,8 @@
 import { assert } from 'chai';
 import { configEquals } from './CharAtlasUtils';
 import { ICharAtlasConfig } from './Types';
-import { NULL_COLOR } from 'common/Color';
-import { IColor } from 'common/Types';
+import { NULL_COLOR } from '../../../../common/Color';
+import { IColor } from '../../../../common/Types';
 
 function createTestConfig(overrides: Partial<ICharAtlasConfig> = {}): ICharAtlasConfig {
   const color: IColor = { css: '#ffffff', rgba: 0xffffffff };
@@ -39,7 +39,8 @@ function createTestConfig(overrides: Partial<ICharAtlasConfig> = {}): ICharAtlas
   return {
     customGlyphs: true,
     devicePixelRatio: 1,
-    deviceMaxTextureSize: 4096,
+    maxTextureSize: 4096,
+    maxAtlasPages: 16,
     letterSpacing: 0,
     lineHeight: 1,
     fontSize: 15,
@@ -66,9 +67,15 @@ describe('CharAtlasUtils', () => {
       assert.ok(configEquals(a, b));
     });
 
-    it('should return false when deviceMaxTextureSize differs', () => {
+    it('should return false when maxTextureSize differs', () => {
       const a = createTestConfig();
-      const b = createTestConfig({ deviceMaxTextureSize: 8192 });
+      const b = createTestConfig({ maxTextureSize: 8192 });
+      assert.ok(!configEquals(a, b));
+    });
+
+    it('should return false when maxAtlasPages differs', () => {
+      const a = createTestConfig();
+      const b = createTestConfig({ maxAtlasPages: 8 });
       assert.ok(!configEquals(a, b));
     });
 

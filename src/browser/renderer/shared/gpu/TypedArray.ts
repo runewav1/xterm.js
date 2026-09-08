@@ -30,3 +30,9 @@ export function sliceFallback<T extends TypedArray>(array: T, start: number = 0,
   }
   return result;
 }
+
+export function expandFloat32Array(array: Float32Array, maxLength: number): Float32Array {
+  const newArray = new Float32Array(Math.min(array.length * 2, maxLength));
+  newArray.set(array);
+  return newArray;
+}

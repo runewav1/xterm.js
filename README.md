@@ -107,7 +107,7 @@ The xterm.js team maintains the following addons, but anyone can build them:
 - [`@xterm/addon-unicode11`](https://github.com/xtermjs/xterm.js/tree/master/addons/addon-unicode11): Updates character widths to their unicode11 values
 - [`@xterm/addon-web-fonts`](https://github.com/xtermjs/xterm.js/tree/master/addons/addon-web-fonts): Easily integrate web fonts
 - [`@xterm/addon-web-links`](https://github.com/xtermjs/xterm.js/tree/master/addons/addon-web-links): Adds web link detection and interaction
-- [`@xterm/addon-webgl`](https://github.com/xtermjs/xterm.js/tree/master/addons/addon-webgl): Renders xterm.js using a `canvas` element's webgl2 context
+- [`@partty/addon-webgl`](https://github.com/xtermjs/xterm.js/tree/master/addons/addon-webgl): Renders xterm.js using a `canvas` element's webgl2 context
 
 ## Browser Support
 

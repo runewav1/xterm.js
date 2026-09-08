@@ -38,7 +38,7 @@ import { SearchAddon, ISearchOptions } from '@xterm/addon-search';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { WebFontsAddon } from '@xterm/addon-web-fonts';
 import { WebLinksAddon } from '@xterm/addon-web-links';
-import { WebglAddon } from '@xterm/addon-webgl';
+import { WebglAddon } from '@partty/addon-webgl';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { UnicodeGraphemesAddon } from '@xterm/addon-unicode-graphemes';
 import { AddonCollection, type AddonType, type IDemoAddon } from './types';

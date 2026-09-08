@@ -4,12 +4,12 @@
  */
 
 import { ICharAtlasConfig } from './Types';
-import { Attributes } from 'common/buffer/Constants';
+import { Attributes } from '../../../../common/buffer/Constants';
 import { ITerminalOptions } from '@xterm/xterm';
-import { IColorSet, ReadonlyColorSet } from 'browser/Types';
-import { NULL_COLOR } from 'common/Color';
+import { IColorSet, ReadonlyColorSet } from '../../../Types';
+import { NULL_COLOR } from '../../../../common/Color';
 
-export function generateConfig(deviceCellWidth: number, deviceCellHeight: number, deviceCharWidth: number, deviceCharHeight: number, options: Required<ITerminalOptions>, colors: ReadonlyColorSet, devicePixelRatio: number, deviceMaxTextureSize: number, customGlyphs: boolean = true): ICharAtlasConfig {
+export function generateConfig(deviceCellWidth: number, deviceCellHeight: number, deviceCharWidth: number, deviceCharHeight: number, options: Required<ITerminalOptions>, colors: ReadonlyColorSet, devicePixelRatio: number, maxTextureSize: number, maxAtlasPages: number, customGlyphs: boolean = true): ICharAtlasConfig {
   // null out some fields that don't matter
   const clonedColors: IColorSet = {
     foreground: colors.foreground,
@@ -34,7 +34,8 @@ export function generateConfig(deviceCellWidth: number, deviceCellHeight: number
   return {
     customGlyphs,
     devicePixelRatio,
-    deviceMaxTextureSize,
+    maxTextureSize,
+    maxAtlasPages,
     letterSpacing: options.letterSpacing,
     lineHeight: options.lineHeight,
     deviceCellWidth: deviceCellWidth,
@@ -59,7 +60,8 @@ export function configEquals(a: ICharAtlasConfig, b: ICharAtlasConfig): boolean 
     }
   }
   return a.devicePixelRatio === b.devicePixelRatio &&
-      a.deviceMaxTextureSize === b.deviceMaxTextureSize &&
+      a.maxTextureSize === b.maxTextureSize &&
+      a.maxAtlasPages === b.maxAtlasPages &&
       a.customGlyphs === b.customGlyphs &&
       a.lineHeight === b.lineHeight &&
       a.letterSpacing === b.letterSpacing &&

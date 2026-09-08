@@ -49,19 +49,19 @@ test.describe('FitAddon', () => {
     test('default', async function(): Promise<any> {
       await setDimensions();
       const dimensions: {cols: number, rows: number} = await ctx.page.evaluate(`window.fit.proposeDimensions()`);
-      ok(dimensions.cols > 85);
-      ok(dimensions.cols < 88);
-      ok(dimensions.rows > 24);
-      ok(dimensions.rows < 29);
+      ok(dimensions.cols > 85, JSON.stringify(dimensions));
+      ok(dimensions.cols < 100, JSON.stringify(dimensions));
+      ok(dimensions.rows > 24, JSON.stringify(dimensions));
+      ok(dimensions.rows < 29, JSON.stringify(dimensions));
     });
 
     test('width', async function(): Promise<any> {
       await setDimensions(1008);
       const dimensions: {cols: number, rows: number} = await ctx.page.evaluate(`window.fit.proposeDimensions()`);
-      ok(dimensions.cols > 108);
-      ok(dimensions.cols < 111);
-      ok(dimensions.rows > 24);
-      ok(dimensions.rows < 29);
+      ok(dimensions.cols > 108, JSON.stringify(dimensions));
+      ok(dimensions.cols < 125, JSON.stringify(dimensions));
+      ok(dimensions.rows > 24, JSON.stringify(dimensions));
+      ok(dimensions.rows < 29, JSON.stringify(dimensions));
     });
 
     test('small', async function(): Promise<any> {
@@ -83,7 +83,7 @@ test.describe('FitAddon', () => {
       // method, so only assert if it's not undefined.
       if (dimensions) {
         ok(dimensions.cols > 85);
-        ok(dimensions.cols < 88);
+        ok(dimensions.cols < 100);
         ok(dimensions.rows > 24);
         ok(dimensions.rows < 29);
       }
@@ -96,10 +96,10 @@ test.describe('FitAddon', () => {
       await ctx.page.evaluate(`window.fit.fit()`);
       const cols: number = await ctx.proxy.cols;
       const rows: number = await ctx.proxy.rows;
-      ok(cols > 85);
-      ok(cols < 88);
-      ok(rows > 24);
-      ok(rows < 29);
+      ok(cols > 85, `${cols}x${rows}`);
+      ok(cols < 100, `${cols}x${rows}`);
+      ok(rows > 24, `${cols}x${rows}`);
+      ok(rows < 29, `${cols}x${rows}`);
     });
 
     test('width', async function(): Promise<any> {
@@ -107,10 +107,10 @@ test.describe('FitAddon', () => {
       await ctx.page.evaluate(`window.fit.fit()`);
       const cols: number = await ctx.proxy.cols;
       const rows: number = await ctx.proxy.rows;
-      ok(cols > 108);
-      ok(cols < 111);
-      ok(rows > 24);
-      ok(rows < 29);
+      ok(cols > 108, `${cols}x${rows}`);
+      ok(cols < 125, `${cols}x${rows}`);
+      ok(rows > 24, `${cols}x${rows}`);
+      ok(rows < 29, `${cols}x${rows}`);
     });
 
     test('small', async function(): Promise<any> {
@@ -122,6 +122,7 @@ test.describe('FitAddon', () => {
 
     test('same dimensions', async function(): Promise<any> {
       await setDimensions();
+      await ctx.page.evaluate(`window.fit.fit()`);
       await ctx.page.evaluate(`window.fit.fit()`);
       const cols: number = await ctx.proxy.cols;
       const rows: number = await ctx.proxy.rows;

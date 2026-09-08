@@ -16,10 +16,10 @@
     "xterm.js"
   ],
   "scripts": {
-    "build": "../../node_modules/.bin/tsgo -p .",
-    "prepackage": "npm run build",
+    "build": "../../node_modules/.bin/tsc -p .",
+    "prepackage": "pnpm run build",
     "package": "../../node_modules/.bin/webpack",
-    "prepublishOnly": "npm run package",
+    "prepublishOnly": "pnpm run package",
     "start": "node ../../demo/start",
     "benchmark": "../../node_modules/.bin/xterm-benchmark -r 5 -c benchmark/benchmark.json",
     "benchmark-baseline": "../../node_modules/.bin/xterm-benchmark -r 5 -c benchmark/benchmark.json --baseline out-benchmark/benchmark/*benchmark.js",

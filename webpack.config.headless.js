@@ -7,7 +7,7 @@ const path = require('path');
 
 /**
  * This webpack config does a production build for xterm.js headless. It works by taking the output
- * from tsc (via `npm run watch` or `npm run prebuild`) which are put into `out/` and webpacks them
+ * from tsc (via `pnpm run watch` or `pnpm run prebuild`) which are put into `out/` and webpacks them
  * into a production mode umd library module in `lib-headless/`.
  *
  * @type {import('webpack').Configuration}

@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const nodeModulesPath = resolve(repoRoot, 'node_modules');
-const npmExecutable = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+const pnpmLockPath = resolve(repoRoot, 'pnpm-lock.yaml');
+const pnpmExecutable = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
 
 /** @typedef {{ folder: string; reason: string }} Candidate */
 
@@ -17,9 +18,9 @@ function log(message) {
 }
 
 /** @param {string[]} args */
-function runNpm(args) {
-  log(`Running: npm ${args.join(' ')}`);
-  const result = spawnSync(npmExecutable, args, {
+function runPnpm(args) {
+  log(`Running: pnpm ${args.join(' ')}`);
+  const result = spawnSync(pnpmExecutable, args, {
     cwd: repoRoot,
     stdio: 'inherit'
   });
@@ -29,6 +30,10 @@ function runNpm(args) {
   if ((result.status ?? 1) !== 0) {
     process.exit(result.status ?? 1);
   }
+}
+
+function installDependencies() {
+  runPnpm(existsSync(pnpmLockPath) ? ['install', '--frozen-lockfile'] : ['install']);
 }
 
 /**
@@ -124,15 +129,15 @@ if (!existsSync(nodeModulesPath)) {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       log(`node_modules copy failed: ${message}`);
-      log('Falling back to npm ci.');
-      runNpm(['ci']);
+      log('Falling back to pnpm install.');
+      installDependencies();
     }
   } else {
-    log('No source folder available, running npm ci.');
-    runNpm(['ci']);
+    log('No source folder available, running pnpm install.');
+    installDependencies();
   }
 } else {
   log(`node_modules already exists: ${nodeModulesPath}`);
 }
 
-runNpm(['run', 'setup']);
+runPnpm(['run', 'setup']);

@@ -406,7 +406,9 @@ test.describe('ImageAddon', () => {
         const header = 'width=20;height=5;preserveAspectRatio=0';
         await ctx.proxy.write(`\x1b]1337;File=inline=1;size=${size};${header}:${payload}\x07`);
         const dim = await getDimensions();
-        deepStrictEqual(await getOrigSize(1), [dim.cellWidth * 20, dim.cellHeight * 5]);
+        const originalSize = await getOrigSize(1);
+        ok(Math.abs(originalSize[0] - dim.cellWidth * 20) <= 1);
+        ok(Math.abs(originalSize[1] - dim.cellHeight * 5) <= 1);
       });
       test(name + ': Npx --> width=320px height=160px preserveAspectRatio=0', async () => {
         // pixel based resize
@@ -452,8 +454,8 @@ test.describe('ImageAddon', () => {
 async function getDimensions(): Promise<IDimensions> {
   const dimensions: any = await ctx.page.evaluate(`term.dimensions`);
   return {
-    cellWidth: Math.round(dimensions.css.cell.width),
-    cellHeight: Math.round(dimensions.css.cell.height),
+    cellWidth: dimensions.css.cell.width,
+    cellHeight: dimensions.css.cell.height,
     width: Math.round(dimensions.css.canvas.width),
     height: Math.round(dimensions.css.canvas.height)
   };

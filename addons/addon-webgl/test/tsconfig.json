@@ -1,5 +1,6 @@
 {
   "compilerOptions": {
+    "skipLibCheck": true,
     "module": "commonjs",
     "target": "ESNext",
     "lib": [
@@ -15,6 +16,9 @@
       ],
       "browser/*": [
         "../../../src/browser/*"
+      ],
+      "@partty/addon-webgl": [
+        "../typings/addon-webgl.d.ts"
       ],
       "*": [
         "./*"

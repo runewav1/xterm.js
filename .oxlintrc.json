@@ -149,7 +149,10 @@
           "name": "jsdoc-js",
           "specifier": "eslint-plugin-jsdoc"
         },
-        "oxlint-plugin-eslint"
+        {
+          "name": "eslint-js",
+          "specifier": "oxlint-plugin-eslint"
+        }
       ],
       "rules": {
         "@stylistic/comma-spacing": [

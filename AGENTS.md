@@ -16,18 +16,18 @@
 
 **Build System**:
 ```bash
-npm run build && npm run esbuild # Build all TypeScript and bundle
+pnpm run build && pnpm run esbuild # Build all TypeScript and bundle
 ```
 
 **Testing**:
-- Unit tests: `npm run test-unit` (Mocha)
-- Unit tests filtering to file: `npm run test-unit -- **/fileName.ts
-- Per-addon unit tests: `npm run test-unit -- addons/addon-image/out-esbuild/*.test.js`
-- Integration tests: `npm run test-integration` (Playwright across Chrome/Firefox/WebKit)
-- Integration tests by file: `npm run test-integration -- test/playwright/InputHandler.test.ts`. Never use grep to filter tests, it doesn't work
-- Integration tests by addon: `npm run test-integration -- --suite=addon-search`. Suites always follow the format `addon-<something>`
-- Lint: `npm run lint` (oxlint with type-aware rules, then ESLint for `naming-convention` only), `npm run lint-api` for `typings/`, `npm run lint-fix` for oxlint auto-fix
-- Lint changes: `npm run lint-changes` to lint only changed files, `npm run lint-changes-fix` to fix them
+- Unit tests: `pnpm run test-unit` (Mocha)
+- Unit tests filtering to file: `pnpm run test-unit **/fileName.ts
+- Per-addon unit tests: `pnpm run test-unit addons/addon-image/out-esbuild/*.test.js`
+- Integration tests: `pnpm run test-integration` (Playwright across Chrome/Firefox/WebKit)
+- Integration tests by file: `pnpm run test-integration test/playwright/InputHandler.test.ts`. Never use grep to filter tests, it doesn't work
+- Integration tests by addon: `pnpm run test-integration --suite=addon-search`. Suites always follow the format `addon-<something>`
+- Lint: `pnpm run lint` (oxlint with type-aware rules, then ESLint for `naming-convention` only), `pnpm run lint-api` for `typings/`, `pnpm run lint-fix` for oxlint auto-fix
+- Lint changes: `pnpm run lint-changes` to lint only changed files, `pnpm run lint-changes-fix` to fix them
 
 ## Addon Development Pattern
 
@@ -102,12 +102,12 @@ const cell = line?.getCell(0);
 
 ## Cursor Cloud specific instructions
 
-**Demo server**: Start with `npm start` (port 3000). The demo server uses node-pty to spawn real shell sessions over WebSocket. Integration tests auto-start it via Playwright's `webServer` config, so you don't need to start it manually for `npm run test-integration`.
+**Demo server**: Start with `pnpm start` (port 3000). The demo server uses node-pty to spawn real shell sessions over WebSocket. Integration tests auto-start it via Playwright's `webServer` config, so you don't need to start it manually for `pnpm run test-integration`.
 
-**Build before testing**: Always run `npm run build && npm run esbuild` before `npm run test-unit`. Integration tests also need `npm run esbuild-demo-client` and `npm run esbuild-demo-server`. The update script handles this automatically on session start.
+**Build before testing**: Always run `pnpm run build && pnpm run esbuild` before `pnpm run test-unit`. Integration tests also need `pnpm run esbuild-demo-client` and `pnpm run esbuild-demo-server`. The update script handles this automatically on session start.
 
 **No external services**: This project has zero external dependencies (no databases, Docker, or APIs). Everything runs locally with Node.js.
 
-**TypeScript compiler**: The project uses `tsgo` (native TypeScript compiler preview) rather than standard `tsc`. It's installed via the `@typescript/native-preview` package.
+**TypeScript compiler**: The project uses the TypeScript 7 `tsc` compiler.
 
-**Lint only changed files**: Prefer `npm run lint-changes` over `npm run lint` when iterating on code changes — it's significantly faster.
+**Lint only changed files**: Prefer `pnpm run lint-changes` over `pnpm run lint` when iterating on code changes — it's significantly faster.

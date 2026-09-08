@@ -17,11 +17,19 @@ const xtermHeadlessPackageJson = {
   name: '@xterm/headless',
   description: 'A headless terminal component that runs in Node.js',
   main: 'lib-headless/xterm-headless.js',
+  module: 'lib-headless/xterm-headless.mjs',
   types: 'typings/xterm-headless.d.ts',
+  exports: {
+    types: './typings/xterm-headless.d.ts',
+    import: './lib-headless/xterm-headless.mjs',
+    require: './lib-headless/xterm-headless.js'
+  }
 };
 delete xtermHeadlessPackageJson['scripts'];
 delete xtermHeadlessPackageJson['devDependencies'];
 delete xtermHeadlessPackageJson['style'];
+delete xtermHeadlessPackageJson['packageManager'];
+delete xtermHeadlessPackageJson['workspaces'];
 fs.writeFileSync(join(headlessRoot, 'package.json'), JSON.stringify(xtermHeadlessPackageJson, null, 1));
 console.log(fs.readFileSync(join(headlessRoot, 'package.json')).toString());
 

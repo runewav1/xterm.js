@@ -6,19 +6,15 @@
 import { IImage32, decodePng } from '@lunapaint/png-codec';
 import test, { expect } from '@playwright/test';
 import type { Terminal, ITerminalInitOnlyOptions, ITerminalOptions } from '@xterm/xterm';
-import type { IWebglAddonOptions, WebglAddon } from '@xterm/addon-webgl';
+import type { IWebglAddonOptions, WebglAddon } from '@partty/addon-webgl';
 import { ITestContext, createTestContext, openTerminal } from '../../../test/playwright/TestUtils';
 
 type CellSignature = number[];
 type TestTerminalConstructor = new (options?: ITerminalOptions & ITerminalInitOnlyOptions) => ITestTerminal;
 type TestWebglAddonConstructor = new (options?: IWebglAddonOptions) => ITestWebglAddon;
 
-interface ITestTextureAtlasConstructor {
-  maxAtlasPages: number | undefined;
-}
-
 interface ITestTextureAtlas {
-  constructor: ITestTextureAtlasConstructor;
+  _config: { maxAtlasPages: number };
 }
 
 interface ITestRenderer {
@@ -112,19 +108,10 @@ async function setMaxAtlasPages(ctx: ITestContext, maxAtlasPages: number): Promi
     if (!atlas) {
       return false;
     }
-    atlas.constructor.maxAtlasPages = max;
+    atlas._config.maxAtlasPages = max;
     return true;
   }, maxAtlasPages);
-  expect(applied, 'should be able to set TextureAtlas.maxAtlasPages').toBe(true);
-}
-
-async function resetMaxAtlasPages(ctx: ITestContext): Promise<void> {
-  await ctx.page.evaluate(() => {
-    const atlas = window.term?._core?._renderService?._renderer?.value?._charAtlas;
-    if (atlas) {
-      atlas.constructor.maxAtlasPages = undefined;
-    }
-  });
+  expect(applied, 'should be able to set TextureAtlas._config.maxAtlasPages').toBe(true);
 }
 
 function generateColoredAsciiFlood(cells: number, offset: number = 0): string {
@@ -236,7 +223,6 @@ test.describe('shared-atlas garble across terminals (#6038)', () => {
         expectSignatureMatches(after[i], reference[i], `terminal B header col ${HEADER_COLS[i]} garbled by terminal A's atlas merges`);
       }
     } finally {
-      await resetMaxAtlasPages(ctx).catch(() => {});
       await ctx.page.close();
     }
   });

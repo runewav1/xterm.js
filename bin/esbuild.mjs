@@ -7,6 +7,12 @@
 
 import { build, context, default as esbuild } from 'esbuild';
 import { argv } from 'process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Resolve all paths against the repo root so the script works from any CWD
+// (e.g. an addon's `package` script run via `npm publish`).
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const config = {
   isProd: argv.includes('--prod'),
@@ -102,18 +108,18 @@ let skipOutTest = false;
 if (config.addon) {
   bundleConfig = {
     ...bundleConfig,
-    entryPoints: [`addons/addon-${config.addon}/src/${getAddonEntryPoint(config.addon)}.ts`],
-    outfile: `addons/addon-${config.addon}/lib/addon-${config.addon}.mjs`,
+    entryPoints: [path.join(root, `addons/addon-${config.addon}/src/${getAddonEntryPoint(config.addon)}.ts`)],
+    outfile: path.join(root, `addons/addon-${config.addon}/lib/addon-${config.addon}.mjs`),
   };
   outConfig = {
     ...outConfig,
-    entryPoints: [`addons/addon-${config.addon}/src/**/*.ts`],
-    outdir: `addons/addon-${config.addon}/out-esbuild/`
+    entryPoints: [path.join(root, `addons/addon-${config.addon}/src/**/*.ts`)],
+    outdir: path.join(root, `addons/addon-${config.addon}/out-esbuild/`)
   };
   outTestConfig = {
     ...outConfig,
-    entryPoints: [`addons/addon-${config.addon}/test/**/*.ts`],
-    outdir: `addons/addon-${config.addon}/out-esbuild-test/`
+    entryPoints: [path.join(root, `addons/addon-${config.addon}/test/**/*.ts`)],
+    outdir: path.join(root, `addons/addon-${config.addon}/out-esbuild-test/`)
   };
 
   if (config.addon === 'ligatures') {
@@ -122,37 +128,37 @@ if (config.addon) {
   }
 
   if (config.addon === 'serialize') {
-    bundleConfig.tsconfig = 'addons/addon-serialize/src/tsconfig.json'
+    bundleConfig.tsconfig = path.join(root, 'addons/addon-serialize/src/tsconfig.json')
   }
 } else if (config.isDemoClient) {
   bundleConfig = {
     ...bundleConfig,
     sourcemap: false,
-    entryPoints: [`demo/client/client.ts`],
-    outfile: 'demo/dist/client-bundle.js',
+    entryPoints: [path.join(root, 'demo/client/client.ts')],
+    outfile: path.join(root, 'demo/dist/client-bundle.js'),
     external: ['util', 'os', 'fs', 'path', 'stream', 'Terminal'],
     alias: {
       // Library ESM imports
-      "@xterm/xterm": ".",
-      "@xterm/addon-attach": "./addons/addon-attach/lib/addon-attach.mjs",
-      "@xterm/addon-clipboard": "./addons/addon-clipboard/lib/addon-clipboard.mjs",
-      "@xterm/addon-fit": "./addons/addon-fit/lib/addon-fit.mjs",
-      "@xterm/addon-image": "./addons/addon-image/lib/addon-image.mjs",
-      "@xterm/addon-progress": "./addons/addon-progress/lib/addon-progress.mjs",
-      "@xterm/addon-search": "./addons/addon-search/lib/addon-search.mjs",
-      "@xterm/addon-serialize": "./addons/addon-serialize/lib/addon-serialize.mjs",
-      "@xterm/addon-web-fonts": "./addons/addon-web-fonts/lib/addon-web-fonts.mjs",
-      "@xterm/addon-web-links": "./addons/addon-web-links/lib/addon-web-links.mjs",
-      "@xterm/addon-webgl": "./addons/addon-webgl/lib/addon-webgl.mjs",
-      "@xterm/addon-unicode11": "./addons/addon-unicode11/lib/addon-unicode11.mjs",
-      "@xterm/addon-unicode-graphemes": "./addons/addon-unicode-graphemes/lib/addon-unicode-graphemes.mjs",
+      "@xterm/xterm": path.join(root, '.'),
+      "@xterm/addon-attach": path.join(root, './addons/addon-attach/lib/addon-attach.mjs'),
+      "@xterm/addon-clipboard": path.join(root, './addons/addon-clipboard/lib/addon-clipboard.mjs'),
+      "@xterm/addon-fit": path.join(root, './addons/addon-fit/lib/addon-fit.mjs'),
+      "@xterm/addon-image": path.join(root, './addons/addon-image/lib/addon-image.mjs'),
+      "@xterm/addon-progress": path.join(root, './addons/addon-progress/lib/addon-progress.mjs'),
+      "@xterm/addon-search": path.join(root, './addons/addon-search/lib/addon-search.mjs'),
+      "@xterm/addon-serialize": path.join(root, './addons/addon-serialize/lib/addon-serialize.mjs'),
+      "@xterm/addon-web-fonts": path.join(root, './addons/addon-web-fonts/lib/addon-web-fonts.mjs'),
+      "@xterm/addon-web-links": path.join(root, './addons/addon-web-links/lib/addon-web-links.mjs'),
+      "@partty/addon-webgl": path.join(root, './addons/addon-webgl/lib/addon-webgl.mjs'),
+      "@xterm/addon-unicode11": path.join(root, './addons/addon-unicode11/lib/addon-unicode11.mjs'),
+      "@xterm/addon-unicode-graphemes": path.join(root, './addons/addon-unicode-graphemes/lib/addon-unicode-graphemes.mjs'),
 
       // Non-bundled ESM imports
       // HACK: Ligatures imports fs which in the esbuild bundle resolves at runtime _on startup_
       //       instead of only when it's needed. This causes a `Dynamic require of "fs" is not
       //       supported` exception to be thrown. So the unbundled out-esbuild sources are used
       //       instead of the .mjs file which seems to resolve the issue.
-      "@xterm/addon-ligatures": "./addons/addon-ligatures/out-esbuild/LigaturesAddon",
+      "@xterm/addon-ligatures": path.join(root, './addons/addon-ligatures/out-esbuild/LigaturesAddon'),
     }
   }
   skipOut = true;
@@ -160,8 +166,8 @@ if (config.addon) {
 } else if (config.isDemoServer) {
   bundleConfig = {
     ...bundleConfig,
-    entryPoints: [`demo/server/server.ts`],
-    outfile: 'demo/dist/server-bundle.js',
+    entryPoints: [path.join(root, 'demo/server/server.ts')],
+    outfile: path.join(root, 'demo/dist/server-bundle.js'),
     format: 'cjs',
     platform: 'node',
     external: ['node-pty'],
@@ -171,34 +177,34 @@ if (config.addon) {
 } else if (config.isHeadless) {
   bundleConfig = {
     ...bundleConfig,
-    entryPoints: [`src/headless/public/Terminal.ts`],
-    outfile: `headless/lib-headless/xterm-headless.mjs`
+    entryPoints: [path.join(root, 'src/headless/public/Terminal.ts')],
+    outfile: path.join(root, 'headless/lib-headless/xterm-headless.mjs')
   };
   outConfig = {
     ...outConfig,
-    entryPoints: ['src/**/*.ts'],
-    outdir: 'out-esbuild/'
+    entryPoints: [path.join(root, 'src/**/*.ts')],
+    outdir: path.join(root, 'out-esbuild/')
   };
   skipOut = true;
 } else {
   bundleConfig = {
     ...bundleConfig,
-    entryPoints: [`src/browser/public/Terminal.ts`],
-    outfile: `lib/xterm.mjs`
+    entryPoints: [path.join(root, 'src/browser/public/Terminal.ts')],
+    outfile: path.join(root, 'lib/xterm.mjs')
   };
   outConfig = {
     ...outConfig,
     entryPoints: [
-      'src/browser/**/*.ts',
-      'src/common/**/*.ts',
-      'src/headless/**/*.ts'
+      path.join(root, 'src/browser/**/*.ts'),
+      path.join(root, 'src/common/**/*.ts'),
+      path.join(root, 'src/headless/**/*.ts')
     ],
-    outdir: 'out-esbuild/'
+    outdir: path.join(root, 'out-esbuild/')
   };
   outTestConfig = {
     ...outConfig,
-    entryPoints: ['test/**/*.ts'],
-    outdir: 'out-esbuild-test/'
+    entryPoints: [path.join(root, 'test/**/*.ts')],
+    outdir: path.join(root, 'out-esbuild-test/')
   };
 }
 

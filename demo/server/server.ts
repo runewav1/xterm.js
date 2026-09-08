@@ -48,6 +48,7 @@ function startServer(): void {
   app.use('/fonts', express.static(demoRoot + '/fonts'));
 
   app.use('/dist', express.static(demoRoot + '/dist'));
+  app.use('/addons/addon-webgpu/lib', express.static(demoRoot + '/../addons/addon-webgpu/lib'));
   app.use('/src', express.static(demoRoot + '/src'));
 
   app.post('/terminals', (req, res) => {

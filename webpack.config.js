@@ -9,7 +9,7 @@ const path = require('path');
 
 /**
  * This webpack config does a production build for xterm.js. It works by taking the output from tsc
- * (via `npm run watch` or `npm run prebuild`) which are put into `out/` and webpacks them into a
+ * (via `pnpm run watch` or `pnpm run prebuild`) which are put into `out/` and webpacks them into a
  * production mode umd library module in `lib/`.
  *
  * @type {import('webpack').Configuration}

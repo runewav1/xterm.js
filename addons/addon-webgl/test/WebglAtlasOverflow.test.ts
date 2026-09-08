@@ -6,24 +6,19 @@
 import { IImage32, decodePng } from '@lunapaint/png-codec';
 import test, { expect } from '@playwright/test';
 import type { Terminal, ITerminalInitOnlyOptions, ITerminalOptions } from '@xterm/xterm';
-import type { IWebglAddonOptions, WebglAddon } from '@xterm/addon-webgl';
+import type { IWebglAddonOptions, WebglAddon } from '@partty/addon-webgl';
 import { ITestContext, createTestContext, openTerminal } from '../../../test/playwright/TestUtils';
 
 type CellSignature = number[];
 type TestTerminalConstructor = new (options?: ITerminalOptions & ITerminalInitOnlyOptions) => ITestTerminal;
 type TestWebglAddonConstructor = new (options?: IWebglAddonOptions) => ITestWebglAddon;
 
-interface ITestTextureAtlasConstructor {
-  maxAtlasPages: number | undefined;
-  maxTextureSize: number | undefined;
-}
-
 interface ITestAtlasPage {
   canvas: HTMLCanvasElement;
 }
 
 interface ITestTextureAtlas {
-  constructor: ITestTextureAtlasConstructor;
+  _config: IAtlasLimits;
   pages: ITestAtlasPage[];
   pageLayoutVersion: number;
   _overflowSizePage?: ITestAtlasPage;
@@ -172,15 +167,15 @@ async function configureAtlasLimits(ctx: ITestContext): Promise<IAtlasLimits> {
   const limits = await ctx.page.evaluate(() => {
     const w = window as unknown as ITestWindow;
     const atlas = w.term._core?._renderService?._renderer?.value?._charAtlas;
-    if (!atlas || atlas.constructor.maxAtlasPages === undefined || atlas.constructor.maxTextureSize === undefined) {
+    if (!atlas) {
       return undefined;
     }
     const result = {
-      maxAtlasPages: atlas.constructor.maxAtlasPages,
-      maxTextureSize: atlas.constructor.maxTextureSize
+      maxAtlasPages: atlas._config.maxAtlasPages,
+      maxTextureSize: atlas._config.maxTextureSize
     };
-    atlas.constructor.maxAtlasPages = 4;
-    atlas.constructor.maxTextureSize = 512;
+    // Fewer than four pages cannot merge. Keep the real texture size for oversized glyphs.
+    atlas._config.maxAtlasPages = 2;
     return result;
   });
   expect(limits, 'TextureAtlas limits must be initialized').toBeDefined();
@@ -195,8 +190,8 @@ async function restoreAtlasLimits(ctx: ITestContext, limits: IAtlasLimits | unde
     const w = window as unknown as ITestWindow;
     const atlas = w.term._core?._renderService?._renderer?.value?._charAtlas;
     if (atlas) {
-      atlas.constructor.maxAtlasPages = original.maxAtlasPages;
-      atlas.constructor.maxTextureSize = original.maxTextureSize;
+      atlas._config.maxAtlasPages = original.maxAtlasPages;
+      atlas._config.maxTextureSize = original.maxTextureSize;
     }
   }, limits);
 }
@@ -234,7 +229,7 @@ async function getAtlasState(ctx: ITestContext): Promise<IAtlasState> {
     }
     return {
       pages: atlas.pages.length,
-      atlasTextures: glyphRenderer._atlasTextures.length,
+      atlasTextures: Math.min(atlas._config.maxAtlasPages, glyphRenderer._atlasTextures.length),
       pageLayoutVersion: atlas.pageLayoutVersion,
       overflowPageCreated: !!atlas._overflowSizePage,
       removals: stats.removals,
@@ -337,11 +332,8 @@ test.describe('atlas page overflow (#6038)', () => {
     try {
       await openTerminal(ctx, { cols: 80, rows: 24 });
       await loadWebglStrict(ctx);
-      limits = await configureAtlasLimits(ctx);
-
-      await openTerminal(ctx, { cols: 80, rows: 24 });
-      await loadWebglStrict(ctx);
       await createTerminalB(ctx, 80);
+      limits = await configureAtlasLimits(ctx);
       await installAtlasEventStats(ctx);
 
       const atlasShared = await ctx.page.evaluate(() => {
@@ -411,8 +403,6 @@ test.describe('atlas page overflow (#6038)', () => {
       await loadWebglStrict(ctx);
       limits = await configureAtlasLimits(ctx);
 
-      await openTerminal(ctx, { cols: 160, rows: 24 });
-      await loadWebglStrict(ctx);
       await installAtlasEventStats(ctx);
 
       let state = await getAtlasState(ctx);

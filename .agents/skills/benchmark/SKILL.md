@@ -7,13 +7,13 @@ description: Run and author benchmark tests in xterm.js. Use when editing benchm
 
 ## Running Benchmarks
 
-- Full suite: `npm run benchmark`
+- Full suite: `pnpm run benchmark`
 - Single benchmark file:
-  - Tree: `npm run benchmark -- -t out-test/benchmark/Event.benchmark.js`
-  - Run file: `npm run benchmark -- -s "out-test/benchmark/Event.benchmark.js" out-test/benchmark/Event.benchmark.js`
+  - Tree: `pnpm run benchmark -t out-test/benchmark/Event.benchmark.js`
+  - Run file: `pnpm run benchmark -s "out-test/benchmark/Event.benchmark.js" out-test/benchmark/Event.benchmark.js`
 - Single context/case:
   - Use `-t` to get the path, then:
-  - `npm run benchmark -- -s "<path>" out-test/benchmark/Event.benchmark.js`
+  - `pnpm run benchmark -s "<path>" out-test/benchmark/Event.benchmark.js`
 
 ## Benchmark Case Selection
 
@@ -25,4 +25,4 @@ When writing benchmark instructions:
 ## Notes
 
 - Benchmarks run from built JS in `out-test/benchmark/*.benchmark.js`.
-- Keep `NODE_PATH=./out` (handled by the npm script).
+- Keep `NODE_PATH=./out` (handled by the pnpm script).

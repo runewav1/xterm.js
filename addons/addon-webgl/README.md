@@ -1,18 +1,18 @@
-## @xterm/addon-webgl
+## @partty/addon-webgl
 
 An addon for [xterm.js](https://github.com/xtermjs/xterm.js) that enables a WebGL2-based renderer. This addon requires xterm.js v4+.
 
 ### Install
 
 ```bash
-npm install --save @xterm/addon-webgl
+npm install --save @partty/addon-webgl
 ```
 
 ### Usage
 
 ```ts
 import { Terminal } from '@xterm/xterm';
-import { WebglAddon } from '@xterm/addon-webgl';
+import { WebglAddon } from '@partty/addon-webgl';
 
 const terminal = new Terminal();
 terminal.open(element);

@@ -5,7 +5,7 @@
 
 import { Terminal, ITerminalAddon, IEvent } from '@xterm/xterm';
 
-declare module '@xterm/addon-webgl' {
+declare module '@partty/addon-webgl' {
   /**
    * An xterm.js addon that provides hardware-accelerated rendering functionality via WebGL.
    */

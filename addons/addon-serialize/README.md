@@ -34,9 +34,9 @@ See the full [API](https://github.com/xtermjs/xterm.js/blob/master/addons/addon-
 ```shell
 $ git clone https://github.com/xtermjs/xterm.js.git
 $ cd xterm.js
-$ npm ci
+$ pnpm install --frozen-lockfile
 $ cd addons/addon-serialize
-$ npm run benchmark && npm run benchmark-baseline
+$ pnpm run benchmark && pnpm run benchmark-baseline
 $ # change some code in `@xterm/addon-serialize`
-$ npm run benchmark-eval
+$ pnpm run benchmark-eval
 ```

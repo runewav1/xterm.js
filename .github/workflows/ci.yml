@@ -17,17 +17,21 @@ jobs:
     - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       with:
         persist-credentials: false
-    - name: Use Node.js 22.x
+    - name: Enable pnpm
+      uses: pnpm/action-setup@v4
+      with:
+        version: 12.3.4
+    - name: Use Node.js 26.x
       uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
       with:
-        node-version: 22.x
-        cache: 'npm'
+        node-version: 26.x
+        cache: 'pnpm'
     - name: Install dependencies
-      run: npm ci
+      run: pnpm install --frozen-lockfile
     - name: Setup and run tsc
-      run: npm run setup
+      run: pnpm run setup
     - name: Esbuild
-      run: npm run esbuild
+      run: pnpm run esbuild
     - name: Zip artifacts
       run: |
         zip -r compressed-build \
@@ -87,20 +91,23 @@ jobs:
     - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       with:
         persist-credentials: false
-    - name: Use Node.js 22.x
+    - name: Enable pnpm
+      uses: pnpm/action-setup@v4
+      with:
+        version: 12.3.4
+    - name: Use Node.js 26.x
       uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
       with:
-        node-version: 22.x
-        cache: 'npm'
+        node-version: 26.x
+        cache: 'pnpm'
     - name: Install dependencies
-      run: |
-        npm ci
+      run: pnpm install --frozen-lockfile
     - name: Lint code
       env:
         NODE_OPTIONS: --max_old_space_size=4096
-      run: npm run lint
+      run: pnpm run lint
     - name: Lint API
-      run: npm run lint-api
+      run: pnpm run lint-api
 
   test-unit-coverage:
     needs: build
@@ -110,14 +117,17 @@ jobs:
     - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       with:
         persist-credentials: false
-    - name: Use Node.js 22.x
+    - name: Enable pnpm
+      uses: pnpm/action-setup@v4
+      with:
+        version: 12.3.4
+    - name: Use Node.js 26.x
       uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
       with:
-        node-version: 22.x
-        cache: 'npm'
+        node-version: 26.x
+        cache: 'pnpm'
     - name: Install dependencies
-      run: |
-        npm ci
+      run: pnpm install --frozen-lockfile
     - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
       with:
         name: build-artifacts
@@ -132,9 +142,9 @@ jobs:
         ls -R
     - name: Unit test coverage
       run: |
-        npm run test-unit-coverage --forbid-only
+        pnpm run test-unit-coverage --forbid-only
         EXIT_CODE=$?
-        ./node_modules/.bin/nyc report --reporter=cobertura
+        pnpm exec nyc report --reporter=cobertura
         exit $EXIT_CODE
 
   test-unit:
@@ -142,21 +152,24 @@ jobs:
     timeout-minutes: 20
     strategy:
       matrix:
-        node-version: [22]
+        node-version: [26]
         runs-on: [ubuntu, macos, windows]
     runs-on: ${{ matrix.runs-on }}-latest
     steps:
     - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       with:
         persist-credentials: false
+    - name: Enable pnpm
+      uses: pnpm/action-setup@v4
+      with:
+        version: 12.3.4
     - name: Use Node.js ${{ matrix.node-version }}.x
       uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
       with:
         node-version: ${{ matrix.node-version }}.x
-        cache: 'npm'
+        cache: 'pnpm'
     - name: Install dependencies
-      run: |
-        npm ci
+      run: pnpm install --frozen-lockfile
     - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
       with:
         name: build-artifacts
@@ -170,14 +183,14 @@ jobs:
         fi
         ls -R
     - name: Unit tests
-      run: npm run test-unit --forbid-only
+      run: pnpm run test-unit --forbid-only
 
   test-integration:
     needs: build
     timeout-minutes: 20
     strategy:
       matrix:
-        node-version: [22] # just one as integration tests are about testing in browser
+        node-version: [26] # just one as integration tests are about testing in browser
         runs-on: [ubuntu-22.04] # macos is flaky
         browser: [chromium, firefox, webkit]
     runs-on: ${{ matrix.runs-on }}
@@ -185,16 +198,19 @@ jobs:
     - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       with:
         persist-credentials: false
+    - name: Enable pnpm
+      uses: pnpm/action-setup@v4
+      with:
+        version: 12.3.4
     - name: Use Node.js ${{ matrix.node-version }}.x
       uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
       with:
         node-version: ${{ matrix.node-version }}.x
-        cache: 'npm'
+        cache: 'pnpm'
     - name: Install dependencies
-      run: |
-        npm ci
+      run: pnpm install --frozen-lockfile
     - name: Install playwright
-      run: npx playwright install --with-deps ${{ matrix.browser }}
+      run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
     - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
       with:
         name: build-artifacts
@@ -208,56 +224,59 @@ jobs:
         fi
         ls -R
     - name: Build demo client
-      run: npm run esbuild-demo-client
+      run: pnpm run esbuild-demo-client
     - name: Build demo server
-      run: npm run esbuild-demo-server
+      run: pnpm run esbuild-demo-server
     - name: Integration tests (core) # Tests use 50% workers to reduce flakiness
-      run: npm run test-integration-${{ matrix.browser }} -- --workers=50% --forbid-only --suite=core
+      run: pnpm run test-integration-${{ matrix.browser }} --workers=50% --forbid-only --suite=core
     - name: Integration tests (addon-attach)
-      run: npm run test-integration-${{ matrix.browser }} -- --workers=50% --forbid-only --suite=addon-attach
+      run: pnpm run test-integration-${{ matrix.browser }} --workers=50% --forbid-only --suite=addon-attach
     - name: Integration tests (addon-clipboard)
-      run: npm run test-integration-${{ matrix.browser }} -- --workers=50% --forbid-only --suite=addon-clipboard
+      run: pnpm run test-integration-${{ matrix.browser }} --workers=50% --forbid-only --suite=addon-clipboard
     - name: Integration tests (addon-fit)
-      run: npm run test-integration-${{ matrix.browser }} -- --workers=50% --forbid-only --suite=addon-fit
+      run: pnpm run test-integration-${{ matrix.browser }} --workers=50% --forbid-only --suite=addon-fit
     - name: Integration tests (addon-image)
-      run: npm run test-integration-${{ matrix.browser }} -- --workers=50% --forbid-only --suite=addon-image
+      run: pnpm run test-integration-${{ matrix.browser }} --workers=50% --forbid-only --suite=addon-image
     - name: Integration tests (addon-progress)
-      run: npm run test-integration-${{ matrix.browser }} -- --workers=50% --forbid-only --suite=addon-progress
+      run: pnpm run test-integration-${{ matrix.browser }} --workers=50% --forbid-only --suite=addon-progress
     - name: Integration tests (addon-search)
-      run: npm run test-integration-${{ matrix.browser }} -- --workers=50% --forbid-only --suite=addon-search
+      run: pnpm run test-integration-${{ matrix.browser }} --workers=50% --forbid-only --suite=addon-search
     - name: Integration tests (addon-serialize)
-      run: npm run test-integration-${{ matrix.browser }} -- --workers=50% --forbid-only --suite=addon-serialize
+      run: pnpm run test-integration-${{ matrix.browser }} --workers=50% --forbid-only --suite=addon-serialize
     - name: Integration tests (addon-unicode-graphemes)
-      run: npm run test-integration-${{ matrix.browser }} -- --workers=50% --forbid-only --suite=addon-unicode-graphemes
+      run: pnpm run test-integration-${{ matrix.browser }} --workers=50% --forbid-only --suite=addon-unicode-graphemes
     - name: Integration tests (addon-unicode11)
-      run: npm run test-integration-${{ matrix.browser }} -- --workers=50% --forbid-only --suite=addon-unicode11
+      run: pnpm run test-integration-${{ matrix.browser }} --workers=50% --forbid-only --suite=addon-unicode11
     - name: Integration tests (addon-web-fonts)
-      run: npm run test-integration-${{ matrix.browser }} -- --workers=50% --forbid-only --suite=addon-web-fonts
+      run: pnpm run test-integration-${{ matrix.browser }} --workers=50% --forbid-only --suite=addon-web-fonts
     - name: Integration tests (addon-web-links)
-      run: npm run test-integration-${{ matrix.browser }} -- --workers=50% --forbid-only --suite=addon-web-links
+      run: pnpm run test-integration-${{ matrix.browser }} --workers=50% --forbid-only --suite=addon-web-links
     - name: Integration tests (addon-webgl)
-      run: npm run test-integration-${{ matrix.browser }} -- --workers=50% --forbid-only --suite=addon-webgl
+      run: pnpm run test-integration-${{ matrix.browser }} --workers=50% --forbid-only --suite=addon-webgl
 
   release-dry-run:
     needs: build
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [22]
+        node-version: [26]
     steps:
     - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       with:
         persist-credentials: false
+    - name: Enable pnpm
+      uses: pnpm/action-setup@v4
+      with:
+        version: 12.3.4
     - name: Use Node.js ${{ matrix.node-version }}.x
       uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
       with:
         node-version: ${{ matrix.node-version }}.x
-        cache: 'npm'
+        cache: 'pnpm'
     - name: Install dependencies
-      run: |
-        npm ci
+      run: pnpm install --frozen-lockfile
     - name: Install playwright
-      run: npx playwright install
+      run: pnpm exec playwright install
     - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
       with:
         name: build-artifacts
@@ -272,7 +291,7 @@ jobs:
         ls -R
     - name: Package headless
       run: |
-        npm run package-headless
+        pnpm run package-headless
         node ./bin/package_headless.js
     - name: Publish to npm (dry run)
       run: node ./bin/publish.js --dry

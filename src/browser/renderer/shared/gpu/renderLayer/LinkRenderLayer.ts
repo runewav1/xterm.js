@@ -4,11 +4,11 @@
  */
 
 import { is256Color } from '../CharAtlasUtils';
-import { INVERTED_DEFAULT_COLOR } from 'browser/renderer/shared/Constants';
-import { IRenderDimensions } from 'browser/renderer/shared/Types';
-import { ICoreBrowserService, IThemeService } from 'browser/services/Services';
-import { ILinkifier2, ILinkifierEvent } from 'browser/Types';
-import { IOptionsService } from 'common/services/Services';
+import { INVERTED_DEFAULT_COLOR } from '../../Constants';
+import { IRenderDimensions } from '../../Types';
+import { ICoreBrowserService, IThemeService } from '../../../../services/Services';
+import { ILinkifier2, ILinkifierEvent } from '../../../../Types';
+import { IOptionsService } from '../../../../../common/services/Services';
 import { Terminal } from '@xterm/xterm';
 import { BaseRenderLayer } from './BaseRenderLayer';
 
@@ -21,10 +21,10 @@ export class LinkRenderLayer extends BaseRenderLayer {
     terminal: Terminal,
     linkifier2: ILinkifier2,
     coreBrowserService: ICoreBrowserService,
-    optionsService: IOptionsService,
+    _optionsService: IOptionsService,
     themeService: IThemeService
   ) {
-    super(terminal, container, 'link', zIndex, true, coreBrowserService, optionsService, themeService);
+    super(terminal, container, 'link', zIndex, coreBrowserService, themeService);
 
     this._register(linkifier2.onShowLinkUnderline(e => this._handleShowLinkUnderline(e)));
     this._register(linkifier2.onHideLinkUnderline(e => this._handleHideLinkUnderline(e)));
