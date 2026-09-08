@@ -11,7 +11,7 @@ import { generateConfig, configEquals } from './CharAtlasUtils';
 import type { ILogService } from '../../../../common/services/Services';
 
 interface ITextureAtlasCacheEntry {
-  atlas: ITextureAtlas;
+  atlas: TextureAtlas;
   config: ICharAtlasConfig;
   ownedBy: object[];
 }
@@ -47,6 +47,7 @@ export function acquireTextureAtlas(
         return entry.atlas;
       }
       // The configs differ, release this owner from the entry
+      entry.atlas.detachFromDom();
       if (entry.ownedBy.length === 1) {
         entry.atlas.dispose();
         charAtlasCache.splice(i, 1);
@@ -84,6 +85,7 @@ export function releaseTextureAtlas(owner: object): void {
   for (let i = 0; i < charAtlasCache.length; i++) {
     const index = charAtlasCache[i].ownedBy.indexOf(owner);
     if (index !== -1) {
+      charAtlasCache[i].atlas.detachFromDom();
       if (charAtlasCache[i].ownedBy.length === 1) {
         // Remove the cache entry if it's the only terminal
         charAtlasCache[i].atlas.dispose();

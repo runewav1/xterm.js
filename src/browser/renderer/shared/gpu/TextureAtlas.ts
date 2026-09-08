@@ -56,6 +56,7 @@ let $glyph = undefined;
 
 export class TextureAtlas implements ITextureAtlas {
   private _didWarmUp: boolean = false;
+  private readonly _warmUpQueue = new IdleTaskQueue(this._logService);
 
   private _cacheMap: FourKeyMap<number, number, number, number, IRasterizedGlyph> = new FourKeyMap();
   private _cacheMapCombined: FourKeyMap<string, number, number, number, IRasterizedGlyph> = new FourKeyMap();
@@ -102,12 +103,26 @@ export class TextureAtlas implements ITextureAtlas {
   }
 
   public dispose(): void {
+    this._warmUpQueue.clear();
     this._tmpCanvas.remove();
+    this._tmpCanvas.width = this._tmpCanvas.height = 0;
     for (const page of this.pages) {
       page.canvas.remove();
+      page.canvas.width = page.canvas.height = 0;
     }
+    this._pages.length = 0;
+    this._activePages.length = 0;
+    this._overflowSizePage = undefined;
+    this._cacheMap.clear();
+    this._cacheMapCombined.clear();
     this._onAddTextureAtlasCanvas.dispose();
     this._onRemoveTextureAtlasCanvas.dispose();
+  }
+
+  public detachFromDom(): void {
+    // A shared atlas must not keep a released terminal's detached DOM tree alive via parentElement.
+    // The next cache miss will attach the scratch canvas to its rendering terminal again.
+    this._tmpCanvas.remove();
   }
 
   public warmUp(): void {
@@ -119,9 +134,8 @@ export class TextureAtlas implements ITextureAtlas {
 
   private _doWarmUp(): void {
     // Pre-fill with ASCII 33-126, this is not urgent and done in idle callbacks
-    const queue = new IdleTaskQueue(this._logService);
     for (let i = 33; i < 126; i++) {
-      queue.enqueue(() => {
+      this._warmUpQueue.enqueue(() => {
         if (!this._cacheMap.get(i, DEFAULT_COLOR, DEFAULT_COLOR, DEFAULT_EXT)) {
           const rasterizedGlyph = this._drawToCache(i, DEFAULT_COLOR, DEFAULT_COLOR, DEFAULT_EXT, false, undefined);
           this._cacheMap.set(i, DEFAULT_COLOR, DEFAULT_COLOR, DEFAULT_EXT, rasterizedGlyph);
@@ -134,20 +148,11 @@ export class TextureAtlas implements ITextureAtlas {
   public get pageLayoutVersion(): number { return this._pageLayoutVersion; }
 
   public clearTexture(): void {
-    if (this._pages[0].currentRow.x === 0 && this._pages[0].currentRow.y === 0) {
-      return;
-    }
-    for (const page of this._pages) {
-      page.clear();
-    }
-    this._cacheMap.clear();
-    this._cacheMapCombined.clear();
-    this._didWarmUp = false;
-
-    // Invalidate renderer models so all texture pages are refreshed. The atlas may be shared, in
-    // which case the clearing renderer has cleared only its own model and every other owner still
-    // holds texture coords into the rows just wiped.
-    this._pageLayoutVersion++;
+    this._warmUpQueue.clear();
+    // Drop high-water capacity as well as glyphs, invalidating every shared renderer's model.
+    this._evictAllPages();
+    this._createNewPage();
+    this._tmpCanvas.width = this._config.deviceCellWidth * 4 + TMP_CANVAS_GLYPH_PADDING * 2;
   }
 
   private _createNewPage(): AtlasPage {
@@ -265,6 +270,7 @@ export class TextureAtlas implements ITextureAtlas {
     for (const page of this._pages) {
       this._onRemoveTextureAtlasCanvas.fire(page.canvas);
       page.canvas.remove();
+      page.canvas.width = page.canvas.height = 0;
     }
     this._pages.length = 0;
     this._activePages.length = 0;
@@ -489,7 +495,6 @@ export class TextureAtlas implements ITextureAtlas {
     if (this._tmpCanvas.height < allowedHeight) {
       this._tmpCanvas.height = allowedHeight;
     }
-    this._tmpCtx.save();
 
     this._workAttributeData.fg = fg;
     this._workAttributeData.bg = bg;
@@ -499,6 +504,7 @@ export class TextureAtlas implements ITextureAtlas {
     if (invisible) {
       return NULL_RASTERIZED_GLYPH;
     }
+    this._tmpCtx.save();
 
     const bold = !!this._workAttributeData.isBold();
     const inverse = !!this._workAttributeData.isInverse();
@@ -1136,6 +1142,8 @@ class AtlasPage {
     this.currentRow.y = 0;
     this.currentRow.height = 0;
     this.fixedRows.length = 0;
+    this._glyphs.length = 0;
+    this._usedPixels = 0;
     this.version = ++AtlasPage.nextVersion;
   }
 }

@@ -6,10 +6,11 @@
 import { assert } from 'chai';
 import { Terminal } from 'browser/public/Terminal';
 import { MockThemeService } from 'browser/TestUtils.test';
-import { RenderModel } from 'browser/renderer/shared/gpu/RenderModel';
+import { RenderModel, RenderModelConstants } from 'browser/renderer/shared/gpu/RenderModel';
 import type { IGlyphRenderer, IRectangleRenderer, IRasterizedGlyph, ITextureAtlas } from 'browser/renderer/shared/gpu/Types';
 import type { IRenderDimensions } from 'browser/renderer/shared/Types';
 import { css } from 'common/Color';
+import { Attributes } from 'common/buffer/Constants';
 import { Emitter } from 'common/Event';
 import { Disposable, DisposableStore, toDisposable } from 'common/Lifecycle';
 import { MockLogService, MockOptionsService } from 'common/TestUtils.test';
@@ -201,6 +202,8 @@ describe('WebgpuBackend', () => {
   let model: RenderModel;
   let glyphRenderer: IGlyphRenderer;
   let rectangleRenderer: IRectangleRenderer;
+  let theme: MockThemeService;
+  let themeChanges: Emitter<MockThemeService['colors']>;
 
   beforeEach(() => {
     store = new DisposableStore();
@@ -226,7 +229,9 @@ describe('WebgpuBackend', () => {
       css: { canvas: { width: 40, height: 80 }, cell: { width: 10, height: 20 } },
       device: { canvas: { width: 40, height: 80 }, cell: { width: 10, height: 20 }, char: { width: 10, height: 20, left: 0, top: 0 } }
     };
-    const theme = new MockThemeService();
+    theme = new MockThemeService();
+    themeChanges = store.add(new Emitter<MockThemeService['colors']>());
+    theme.onChangeColors = themeChanges.event;
     theme.colors = { ...theme.colors, cursor: css.toColor('#ffffff') };
     ({ glyphRenderer, rectangleRenderer } = backend.createRenderers(terminal, dimensions, new MockOptionsService(), theme, new MockLogService()));
     atlas = store.add(new TestAtlas());
@@ -304,6 +309,100 @@ describe('WebgpuBackend', () => {
     assert.strictEqual(gpu.bindGroups.length, bindGroupsAfterFirst + 1);
   });
 
+  it('does not re-upload shared pages when a backend attaches late', () => {
+    frame();
+    const copies = gpu.copies.length;
+    const textures = gpu.textures.length;
+    const theme = new MockThemeService();
+    theme.colors = { ...theme.colors, cursor: css.toColor('#ffffff') };
+    const second = store.add(new WebgpuBackend(gpu.canvas, context));
+    const { glyphRenderer: glyphB } = second.createRenderers(terminal, dimensions, new MockOptionsService(), theme, new MockLogService());
+    glyphB.setAtlas(atlas);
+    glyphB.beginFrame();
+    second.beginRender();
+    glyphB.render(model);
+    second.endRender();
+    assert.strictEqual(gpu.copies.length, copies);
+    assert.strictEqual(gpu.textures.length, textures);
+  });
+
+  it('keeps shared page textures alive while another backend still owns the atlas', () => {
+    frame();
+    const pages = gpu.textures.slice(1);
+    const theme = new MockThemeService();
+    theme.colors = { ...theme.colors, cursor: css.toColor('#ffffff') };
+    const second = store.add(new WebgpuBackend(gpu.canvas, context));
+    const { glyphRenderer: glyphB } = second.createRenderers(terminal, dimensions, new MockOptionsService(), theme, new MockLogService());
+    glyphB.setAtlas(atlas);
+    glyphB.beginFrame();
+    backend.dispose();
+    assert.strictEqual(pages[0].destroyed, 0);
+    assert.strictEqual(pages[1].destroyed, 0);
+    gpu.copies.length = 0;
+    second.beginRender();
+    glyphB.render(model);
+    second.endRender();
+    assert.strictEqual(gpu.copies.length, 0);
+    second.dispose();
+    assert.strictEqual(pages[0].destroyed, 1);
+    assert.strictEqual(pages[1].destroyed, 1);
+    const third = store.add(new WebgpuBackend(gpu.canvas, context));
+    const { glyphRenderer: glyphC } = third.createRenderers(terminal, dimensions, new MockOptionsService(), theme, new MockLogService());
+    glyphC.setAtlas(atlas);
+    glyphC.beginFrame();
+    gpu.copies.length = 0;
+    third.beginRender();
+    glyphC.render(model);
+    third.endRender();
+    assert.strictEqual(gpu.copies.length, 2);
+    assert.strictEqual(pages[0].destroyed, 1);
+    assert.strictEqual(pages[1].destroyed, 1);
+  });
+
+  it('destroys shared page textures when the sole owner releases the atlas', () => {
+    frame();
+    const pages = gpu.textures.slice(1);
+    backend.dispose();
+    assert.strictEqual(pages[0].destroyed, 1);
+    assert.strictEqual(pages[1].destroyed, 1);
+  });
+
+  it('releases and destroys the previous atlas when a sole owner switches atlases', () => {
+    frame();
+    const pages = gpu.textures.slice(1);
+    const replacement = store.add(new TestAtlas());
+    glyphRenderer.setAtlas(replacement);
+    assert.strictEqual(pages[0].destroyed, 1);
+    assert.strictEqual(pages[1].destroyed, 1);
+    gpu.copies.length = 0;
+    glyphRenderer.beginFrame();
+    frame();
+    assert.strictEqual(gpu.copies.length, 2);
+  });
+
+  it('invalidates only the refreshed atlas and leaves unrelated atlases alone', () => {
+    frame();
+    const theme = new MockThemeService();
+    theme.colors = { ...theme.colors, cursor: css.toColor('#ffffff') };
+    const second = store.add(new WebgpuBackend(gpu.canvas, context));
+    const { glyphRenderer: glyphB } = second.createRenderers(terminal, dimensions, new MockOptionsService(), theme, new MockLogService());
+    const otherAtlas = store.add(new TestAtlas());
+    glyphB.setAtlas(otherAtlas);
+    glyphB.beginFrame();
+    second.beginRender();
+    glyphB.render(model);
+    second.endRender();
+    gpu.copies.length = 0;
+    glyphRenderer.invalidateAtlasTextures();
+    frame();
+    assert.strictEqual(gpu.copies.length, 2);
+    assert.deepStrictEqual(gpu.copies.map(e => e.source.source), [atlas.pages[0].canvas, atlas.pages[1].canvas]);
+    second.beginRender();
+    glyphB.render(model);
+    second.endRender();
+    assert.strictEqual(gpu.copies.length, 2);
+  });
+
   it('records one ordered pass with distinct background and cursor buffers', () => {
     update(0, 0);
     model.cursor = { x: 2, y: 1, width: 1, style: 'bar', cursorWidth: 1, dpr: 1 };
@@ -363,6 +462,57 @@ describe('WebgpuBackend', () => {
     update(0, 3);
     frame();
     assert.deepStrictEqual(glyphWrites().map(e => [e.offset, e.byteLength]), [[0, 4 * 44], [3 * 4 * 44, 4 * 44]]);
+  });
+
+  it('redraws unchanged backgrounds without uploads, including cursor-only frames', () => {
+    frame();
+    gpu.writes.length = 0;
+    gpu.draws.length = 0;
+    for (let x = 0; x < 4; x++) {
+      model.cursor = { x, y: 0, width: 1, style: 'bar', cursorWidth: 1, dpr: 1 };
+      rectangleRenderer.updateCursor(model);
+      frame();
+    }
+    assert.strictEqual(gpu.writes.filter(e => e.buffer.label === 'xterm backgrounds').length, 0);
+    assert.strictEqual(gpu.draws.filter(e => e.buffer.label === 'xterm backgrounds').length, 4);
+    assert.strictEqual(gpu.writes.filter(e => e.buffer.label === 'xterm cursor').length, 4);
+  });
+
+  it('uploads backgrounds after dirty rows, theme changes and resize, retaining skipped updates', () => {
+    frame();
+    for (const change of [
+      () => {
+        model.cells[RenderModelConstants.BG_OFFSET] = Attributes.CM_RGB | 0x0000ff;
+        rectangleRenderer.updateBackgrounds(model, 0, 0);
+      },
+      () => {
+        theme.colors = { ...theme.colors, background: css.toColor('#ff0000') };
+        themeChanges.fire(theme.colors);
+      },
+      () => {
+        dimensions.device.canvas.width = 80;
+        rectangleRenderer.setDimensions(dimensions);
+        rectangleRenderer.handleResize();
+        rectangleRenderer.updateBackgrounds(model, 0, terminal.rows - 1);
+      }
+    ]) {
+      gpu.writes.length = 0;
+      change();
+      gpu.canvas.width = 0;
+      frame();
+      assert.strictEqual(gpu.writes.length, 0);
+      gpu.canvas.width = dimensions.device.canvas.width;
+      frame();
+      const writes = gpu.writes.filter(e => e.buffer.label === 'xterm backgrounds');
+      assert.strictEqual(writes.length, 1);
+      const draws = gpu.draws.filter(e => e.buffer.label === 'xterm backgrounds');
+      assert.deepStrictEqual(draws[draws.length - 1].submitted, writes[0].data);
+      frame();
+      assert.strictEqual(gpu.writes.filter(e => e.buffer.label === 'xterm backgrounds').length, 1);
+    }
+    const writes = gpu.writes.filter(e => e.buffer.label === 'xterm backgrounds');
+    assert.deepStrictEqual(Array.from(writes[0].data.slice(0, 8)), [0, 0, 0.5, 1, 1, 0, 0, 1]);
+    assert.deepStrictEqual(Array.from(writes[0].data.slice(8, 16)), [0, 0, 0.125, 0.25, 0, 0, 1, 1]);
   });
 
   it('uploads cleared cells and the whole grid after clear or resize', () => {

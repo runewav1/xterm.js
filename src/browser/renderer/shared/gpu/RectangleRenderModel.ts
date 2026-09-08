@@ -21,6 +21,8 @@ const INITIAL_BUFFER_RECTANGLE_CAPACITY = 20 * INDICES_PER_RECTANGLE;
 class Vertices {
   public attributes: Float32Array;
   public count: number;
+  // Background mutations advance this revision so backends can retain uploaded vertices.
+  public version = 0;
 
   constructor(capacity: number = INITIAL_BUFFER_RECTANGLE_CAPACITY) {
     this.attributes = new Float32Array(capacity);
@@ -63,8 +65,8 @@ export class RectangleRenderModel extends Disposable {
     }));
   }
 
-  public get backgrounds(): { attributes: Float32Array, count: number } { return this._vertices; }
-  public get cursor(): { attributes: Float32Array, count: number } { return this._verticesCursor; }
+  public get backgrounds(): { attributes: Float32Array, count: number, version: number } { return this._vertices; }
+  public get cursor(): { attributes: Float32Array, count: number, version: number } { return this._verticesCursor; }
 
   public handleResize(): void {
     this._updateViewportRectangle();
@@ -80,6 +82,7 @@ export class RectangleRenderModel extends Disposable {
   }
 
   private _updateViewportRectangle(): void {
+    this._vertices.version++;
     // Set first rectangle that clears the screen
     this._addRectangleFloat(
       this._vertices.attributes,
@@ -132,6 +135,7 @@ export class RectangleRenderModel extends Disposable {
       rectIndex += count;
     }
     vertices.count = rectIndex;
+    vertices.version++;
   }
 
   private _updateRow(model: IRenderModel, y: number): void {

@@ -37,6 +37,11 @@ interface IAtlasGpuTextures {
   layoutVersion: number;
   /** Bumped whenever any page texture view is created/recreated. */
   generation: number;
+  /**
+   * Number of backends currently holding this atlas; the last release destroys
+   * the cached textures.
+   */
+  owners: number;
   dispose(): void;
 }
 
@@ -152,12 +157,7 @@ export class WebgpuContext extends Disposable {
    * know when to rebuild.
    */
   public getAtlas(atlas: ITextureAtlas): IAtlasGpuTextures {
-    let entry = this._atlasCache.get(atlas);
-    if (!entry) {
-      const newEntry: IAtlasGpuTextures = { pages: [], layoutVersion: -1, generation: 0, dispose: () => { for (const p of newEntry.pages) p?.dispose(); } };
-      entry = newEntry;
-      this._atlasCache.set(atlas, newEntry);
-    }
+    const entry = this._ensureAtlasEntry(atlas);
     // A layout change (atlas clear or page merge) invalidates the glyph->page
     // mappings even when page objects are unchanged, so force a full re-upload.
     if (entry.layoutVersion !== atlas.pageLayoutVersion) {
@@ -225,16 +225,58 @@ export class WebgpuContext extends Disposable {
     return entry;
   }
 
+  private _ensureAtlasEntry(atlas: ITextureAtlas): IAtlasGpuTextures {
+    let entry = this._atlasCache.get(atlas);
+    if (!entry) {
+      const newEntry: IAtlasGpuTextures = { pages: [], layoutVersion: -1, generation: 0, owners: 0, dispose: () => { for (const p of newEntry.pages) p?.dispose(); } };
+      entry = newEntry;
+      this._atlasCache.set(atlas, newEntry);
+    }
+    return entry;
+  }
+
   /**
-   * Forces a re-upload of all cached atlas pages. Used after atlas merges that
-   * bump the page layout version without necessarily changing page objects.
+   * Marks `atlas` as held by another backend, creating its shared page entry on
+   * first use. Backends must call {@link releaseAtlas} when they stop using an
+   * atlas (switch or dispose) so the last owner can destroy the cached GPU
+   * textures instead of keeping obsolete atlases alive until the context itself
+   * is disposed.
    */
-  public invalidateAtlasTextures(): void {
-    for (const entry of this._atlasCache.values()) {
-      for (const page of entry.pages) {
-        if (page) {
-          page.version = undefined;
-        }
+  public acquireAtlas(atlas: ITextureAtlas): void {
+    this._ensureAtlasEntry(atlas).owners++;
+  }
+
+  /**
+   * Releases a backend-held atlas. The last release destroys the shared page
+   * textures and drops the cache entry so a future acquisition starts from a
+   * fresh, correctly-uploaded state.
+   */
+  public releaseAtlas(atlas: ITextureAtlas): void {
+    const entry = this._atlasCache.get(atlas);
+    if (!entry) {
+      return;
+    }
+    entry.owners--;
+    if (entry.owners <= 0) {
+      this._atlasCache.delete(atlas);
+      entry.dispose();
+    }
+  }
+
+  /**
+   * Forces a re-upload of `atlas`'s cached pages. Used after atlas merges that
+   * bump the page layout version without necessarily changing page objects.
+   * Only the given atlas is invalidated so unrelated shared atlases keep their
+   * uploaded pages.
+   */
+  public invalidateAtlasTextures(atlas: ITextureAtlas): void {
+    const entry = this._atlasCache.get(atlas);
+    if (!entry) {
+      return;
+    }
+    for (const page of entry.pages) {
+      if (page) {
+        page.version = undefined;
       }
     }
   }

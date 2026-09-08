@@ -77,6 +77,8 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
   private _renderersCreated = false;
   private _logService: ILogService | undefined;
   private _pageOverflowWarned = false;
+  private _backgroundVertices: RectangleRenderModel['backgrounds'] | undefined;
+  private _backgroundVersion = -1;
 
   constructor(private readonly _canvas: HTMLCanvasElement, private readonly _context: WebgpuContext) {
     super();
@@ -100,6 +102,12 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
       this._cursorBuffer = this._register(new VertexBuffer(device, 'xterm cursor'));
       this._resolutionBuffer = device.createBuffer({ label: 'xterm resolution', size: 8, usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST });
       this._register(toDisposable(() => this._resolutionBuffer.destroy()));
+      this._register(toDisposable(() => {
+        if (this._atlas) {
+          this._context.releaseAtlas(this._atlas);
+          this._atlas = undefined;
+        }
+      }));
     } catch (error) {
       this.dispose();
       throw error;
@@ -148,8 +156,26 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
     this._context.device.queue.submit([encoder.finish()]);
   }
 
-  public invalidateAtlasTextures(): void {
-    this._context.invalidateAtlasTextures();
+  /**
+   * Attaches this backend to `atlas`, acquiring its shared page textures from
+   * the context and releasing the previously held atlas. The last owner to
+   * release an atlas destroys its GPU textures.
+   */
+  public setAtlas(atlas: ITextureAtlas): void {
+    if (this._atlas === atlas) {
+      return;
+    }
+    if (this._atlas) {
+      this._context.releaseAtlas(this._atlas);
+    }
+    this._atlas = atlas;
+    this._context.acquireAtlas(atlas);
+    this._atlasGpuGeneration = -1;
+    this._atlasBindGroup = undefined;
+  }
+
+  public invalidateAtlasTextures(atlas: ITextureAtlas): void {
+    this._context.invalidateAtlasTextures(atlas);
   }
 
   public renderGlyphs(model: GlyphRenderModel, dirtyRows: Uint8Array, dimensions: IRenderDimensions): void {
@@ -168,9 +194,11 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
     if (this._glyphBuffer.ensure(attributes.byteLength)) {
       dirtyRows.fill(1);
     }
+    if (this._atlas !== atlas) {
+      this.setAtlas(atlas);
+    }
     const gpu = this._context.getAtlas(atlas);
-    if (this._atlas !== atlas || this._atlasGpuGeneration !== gpu.generation) {
-      this._atlas = atlas;
+    if (this._atlasGpuGeneration !== gpu.generation) {
       this._atlasGpuGeneration = gpu.generation;
       this._atlasBindGroup = undefined;
     }
@@ -205,7 +233,7 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
     pass.draw(4, attributes.length / Constants.FLOATS_PER_GLYPH);
   }
 
-  public renderRectangles(vertices: { attributes: Float32Array, count: number }, cursor: boolean): void {
+  public renderRectangles(vertices: RectangleRenderModel['backgrounds'], cursor: boolean): void {
     const pass = this._pass;
     if (!pass || !vertices.count) {
       return;
@@ -215,9 +243,15 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
       throw new RangeError('Invalid WebGPU rectangle count');
     }
     const resource = cursor ? this._cursorBuffer : this._backgroundBuffer;
-    resource.ensure(byteLength);
+    const allocated = resource.ensure(byteLength);
     const buffer = resource.buffer!;
-    this._context.device.queue.writeBuffer(buffer, 0, vertices.attributes.buffer, vertices.attributes.byteOffset, byteLength);
+    if (cursor || allocated || vertices !== this._backgroundVertices || vertices.version !== this._backgroundVersion) {
+      this._context.device.queue.writeBuffer(buffer, 0, vertices.attributes.buffer, vertices.attributes.byteOffset, byteLength);
+      if (!cursor) {
+        this._backgroundVertices = vertices;
+        this._backgroundVersion = vertices.version;
+      }
+    }
     pass.setPipeline(this._context.rectanglePipeline);
     pass.setVertexBuffer(0, buffer, 0, byteLength);
     pass.draw(4, vertices.count);
@@ -283,12 +317,15 @@ class WebgpuGlyphRenderer extends Disposable implements IGlyphRenderer {
 
   public setAtlas(atlas: ITextureAtlas): void {
     this._model.setAtlas(atlas);
-    this.invalidateAtlasTextures();
+    this._backend.setAtlas(atlas);
     this._dirtyRows.fill(1);
   }
 
   public invalidateAtlasTextures(): void {
-    this._backend.invalidateAtlasTextures();
+    const atlas = this._model.atlas;
+    if (atlas) {
+      this._backend.invalidateAtlasTextures(atlas);
+    }
   }
 
   public render(_renderModel: IRenderModel): void {

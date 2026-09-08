@@ -263,11 +263,46 @@ test.describe('WebGPU lifecycle and device validation', () => {
     })()`);
     expect(await ctx.page.evaluate('window.term.buffer.active.getLine(0)?.translateToString(true)')).toContain('pane A');
     expect(await ctx.page.evaluate('window.termB.buffer.active.getLine(0)?.translateToString(true)')).toContain('pane B');
+    // A focused block cursor must render on a shared-session pane alongside another pane.
+    await ctx.page.evaluate(`window.term.options.theme = { cursor: '#0000FF', cursorAccent: '#FFFFFF' }`);
+    await ctx.proxy.focus();
+    await ctx.proxy.write('X');
+    await waitForWebgpuRender(ctx);
+    const shotA = (await decodePng(new Uint8Array(await ctx.page.locator('#terminal-container .xterm-screen').screenshot()), { force32: true })).image;
+    const cellW = shotA.width / 20;
+    const cellH = shotA.height / 4;
+    const cx = Math.floor(7 * cellW + cellW / 2);
+    const cy = Math.floor(0 * cellH + cellH / 2);
+    const cursorPixel = (cy * shotA.width + cx) * 4;
+    expect(Array.from(shotA.data.slice(cursorPixel, cursorPixel + 4)), 'cursor cell must be the cursor color').toEqual([0, 0, 255, 255]);
     await ctx.page.evaluate('window.addonB.dispose(); window.termB.dispose()');
     expect(await ctx.page.evaluate(`(async () => {
       await window.addon._device.queue.onSubmittedWorkDone();
       return window.addon._renderer.isDisposed === false;
     })()`)).toBe(true);
+  });
+
+  test('a session pane renders the block cursor', async () => {
+    await openTerminal(ctx, { cols: 20, rows: 4, cursorBlink: false });
+    await ctx.page.evaluate(`(async () => {
+      const { WebgpuSession } = await import('/addons/addon-webgpu/lib/addon-webgpu.mjs');
+      window.session = await WebgpuSession.create();
+      window.addon = window.session.createAddon();
+      window.term.loadAddon(window.addon);
+    })()`);
+    await assertWebgpuRenderer(ctx);
+    await ctx.page.evaluate(`window.term.options.theme = { cursor: '#0000FF', cursorAccent: '#FFFFFF' }`);
+    await ctx.proxy.focus();
+    await ctx.proxy.write('hello');
+    await waitForWebgpuRender(ctx);
+    const screen = ctx.page.locator('.xterm-screen');
+    const shot = (await decodePng(new Uint8Array(await screen.screenshot()), { force32: true })).image;
+    const cellW = shot.width / 20;
+    const cellH = shot.height / 4;
+    const x = Math.floor(5 * cellW + cellW / 2);
+    const y = Math.floor(0 * cellH + cellH / 2);
+    const pixel = (y * shot.width + x) * 4;
+    expect(Array.from(shot.data.slice(pixel, pixel + 4)), 'cursor cell must be the cursor color').toEqual([0, 0, 255, 255]);
   });
 
   test('disposal is idempotent, restores the DOM renderer and destroys the device', async () => {
@@ -374,7 +409,7 @@ test.describe('WebGPU lifecycle and device validation', () => {
 
   for (const customGlyphs of [true, false]) {
     test(`error-free render snapshots survive atlas clearing and resize (customGlyphs=${customGlyphs})`, async () => {
-      await openTerminal(ctx, { cols: 20, rows: 4, cursorBlink: false });
+      await openTerminal(ctx, { cols: 20, rows: 4, cursorBlink: true });
       await createWebgpuAddon(ctx, customGlyphs);
       await ctx.page.evaluate(`
         window.addon._device.pushErrorScope('validation');

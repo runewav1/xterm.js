@@ -89,6 +89,7 @@ export class GlyphRenderer extends Disposable implements IGlyphRenderer {
   private readonly _resolutionLocation: WebGLUniformLocation;
   private readonly _textureLocation: WebGLUniformLocation;
   private readonly _atlasTextures: GLTexture[];
+  private _uploadedAtlasPageCount = 0;
   private readonly _attributesBuffer: WebGLBuffer;
 
   private readonly _model: GlyphRenderModel;
@@ -282,6 +283,14 @@ export class GlyphRenderer extends Disposable implements IGlyphRenderer {
         this._bindAtlasPageTexture(gl, atlas, i);
       }
     }
+    // Merges, eviction and atlas replacement can leave large textures in now-unused slots.
+    for (let i = pageCount; i < this._uploadedAtlasPageCount; i++) {
+      gl.activeTexture(gl.TEXTURE0 + i);
+      gl.bindTexture(gl.TEXTURE_2D, this._atlasTextures[i].texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([255, 0, 0, 255]));
+      this._atlasTextures[i].version = -1;
+    }
+    this._uploadedAtlasPageCount = pageCount;
 
     // Draw the viewport
     gl.drawElementsInstanced(gl.TRIANGLE_STRIP, 4, gl.UNSIGNED_BYTE, 0, bufferLength / Constants.INDICES_PER_CELL);
