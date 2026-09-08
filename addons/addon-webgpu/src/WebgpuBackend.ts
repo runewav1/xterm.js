@@ -178,7 +178,7 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
     this._context.invalidateAtlasTextures(atlas);
   }
 
-  public renderGlyphs(model: GlyphRenderModel, dirtyRows: Uint8Array, dimensions: IRenderDimensions): void {
+  public renderGlyphs(model: GlyphRenderModel, dirtyRows: Uint8Array, dimensions: IRenderDimensions, lineLengths?: Uint32Array): void {
     const pass = this._pass;
     const atlas = model.atlas;
     const attributes = model.attributes;
@@ -229,8 +229,23 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
     pass.setPipeline(this._context.glyphPipeline);
     pass.setBindGroup(0, this._atlasBindGroup ??= this._createBindGroup(gpu));
     pass.setVertexBuffer(0, buffer, 0, attributes.byteLength);
-    // Draw the cached grid in cell order, including unchanged rows and degenerate empty cells.
-    pass.draw(4, attributes.length / Constants.FLOATS_PER_GLYPH);
+    // Draw only each row's line-length prefix, mirroring the WebGL renderer's
+    // lineLengths packing. This keeps trailing whitespace and fully-empty rows
+    // off the GPU entirely, which is the dominant renderCpuMs gap vs WebGL on
+    // SwiftShader (a full-grid draw of degenerate empty cells is expensive).
+    // Instance data uses stepMode:'instance', so firstInstance selects the row
+    // offset within the persistent row-major buffer.
+    const cols = rowLength / Constants.FLOATS_PER_GLYPH;
+    if (lineLengths && lineLengths.length) {
+      for (let y = 0; y < lineLengths.length; y++) {
+        const len = lineLengths[y];
+        if (len > 0) {
+          pass.draw(4, len, 0, y * cols);
+        }
+      }
+    } else {
+      pass.draw(4, attributes.length / Constants.FLOATS_PER_GLYPH);
+    }
   }
 
   public renderRectangles(vertices: RectangleRenderModel['backgrounds'], cursor: boolean): void {
@@ -330,7 +345,7 @@ class WebgpuGlyphRenderer extends Disposable implements IGlyphRenderer {
 
   public render(_renderModel: IRenderModel): void {
     if (!this._store.isDisposed) {
-      this._backend.renderGlyphs(this._model, this._dirtyRows, this._dimensions);
+      this._backend.renderGlyphs(this._model, this._dirtyRows, this._dimensions, _renderModel.lineLengths);
     }
   }
 }

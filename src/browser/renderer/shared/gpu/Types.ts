@@ -78,11 +78,28 @@ export interface ICharAtlasConfig {
   colors: IColorSet;
 }
 
+export interface IDirtyRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface ITextureAtlas extends IDisposable {
   readonly pages: { canvas: HTMLCanvasElement, version: number }[];
 
   onAddTextureAtlasCanvas: IEvent<HTMLCanvasElement>;
   onRemoveTextureAtlasCanvas: IEvent<HTMLCanvasElement>;
+
+  /**
+   * Returns the dirty rectangles drawn onto `pageIndex` whose recorded page
+   * version is greater than `lastVersion`, so a consumer can upload only the
+   * changed regions into its GPU texture. This is non-destructive: rects stay
+   * available for every consumer, and each consumer tracks its own
+   * `lastVersion` to consume them exactly once. Returns an empty array when
+   * the page index is invalid or there are no newer rects.
+   */
+  getDirtyRects(pageIndex: number, lastVersion: number): ReadonlyArray<IDirtyRect>;
 
   /**
    * Warm up the texture atlas, adding common glyphs to avoid slowing early frame.

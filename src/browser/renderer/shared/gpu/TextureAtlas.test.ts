@@ -57,6 +57,38 @@ describe('TextureAtlas lifecycle', () => {
     }
   });
 
+  it('tracks dirty rects with versions for incremental uploads', () => {
+    const page = atlas.pages[0] as typeof atlas.pages[number] & {
+      version: number;
+      addDirtyRect(x: number, y: number, width: number, height: number, version: number): void;
+      dirtyRects: { version: number }[];
+    };
+    const v1 = ++page.version;
+    page.addDirtyRect(0, 0, 10, 20, v1);
+    assert.deepStrictEqual(atlas.getDirtyRects(0, 0), [{ x: 0, y: 0, width: 10, height: 20 }]);
+    assert.deepStrictEqual(atlas.getDirtyRects(0, v1), []);
+    const v2 = ++page.version;
+    page.addDirtyRect(30, 40, 5, 6, v2);
+    assert.deepStrictEqual(atlas.getDirtyRects(0, v1), [{ x: 30, y: 40, width: 5, height: 6 }]);
+    assert.deepStrictEqual(atlas.getDirtyRects(99, 0), []);
+  });
+
+  it('records a full-page dirty rect when a page is cleared', () => {
+    const page = atlas.pages[0] as typeof atlas.pages[number] & {
+      version: number;
+      clear(): void;
+      dirtyRects: { x: number, y: number, width: number, height: number }[];
+    };
+    const before = page.version;
+    page.clear();
+    assert.isAbove(page.version, before);
+    assert.strictEqual(page.dirtyRects.length, 1);
+    assert.deepStrictEqual(
+      atlas.getDirtyRects(0, before),
+      [{ x: 0, y: 0, width: page.canvas.width, height: page.canvas.height }]
+    );
+  });
+
   it('releases high-water backing dimensions on clear and invalidates shared models', () => {
     const oldPage = atlas.pages[0].canvas;
     oldPage.width = oldPage.height = 4096;

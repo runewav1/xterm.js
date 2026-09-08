@@ -31,6 +31,24 @@ interface IAtlasPageTexture {
   dispose(): void;
 }
 
+/** Internal knobs for the WebGPU backend; not part of the public addon API. */
+export interface IWebgpuContextOptions {
+  /**
+   * When true (default), large incremental glyph additions upload only the
+   * dirty rectangles into the existing GPU page texture via writeTexture
+   * instead of copying the whole page. Small bursts (at or below
+   * `partialUploadThreshold` rects) still do a full-page copy because the
+   * partial path's getImageData readback costs more CPU than a GPU->GPU copy
+   * on a sparse frame. Full-page re-uploads always occur on layout changes.
+   */
+  partialAtlasUpload?: boolean;
+  /**
+   * Dirty-rect count at or below which a full-page copy is preferred over a
+   * partial writeTexture upload. Default 32.
+   */
+  partialUploadThreshold?: number;
+}
+
 interface IAtlasGpuTextures {
   pages: (IAtlasPageTexture | undefined)[];
   /** Last seen atlas page layout version; a change forces a full re-upload. */
@@ -65,11 +83,19 @@ export class WebgpuContext extends Disposable {
   private readonly _atlasCache = new Map<ITextureAtlas, IAtlasGpuTextures>();
   private _lost = false;
 
+  /** Internal: use partial (dirty-rectangle) atlas uploads when true. */
+  public partialAtlasUpload: boolean;
+  /** Internal: dirty-rect count threshold below which a full-page copy is used. */
+  public partialUploadThreshold: number;
+
   constructor(
     public readonly device: GPUDevice,
-    public readonly format: GPUTextureFormat
+    public readonly format: GPUTextureFormat,
+    options: IWebgpuContextOptions = {}
   ) {
     super();
+    this.partialAtlasUpload = options.partialAtlasUpload ?? true;
+    this.partialUploadThreshold = options.partialUploadThreshold ?? 32;
     this.maxTextureSize = device.limits.maxTextureDimension2D;
     this.maxAtlasPages = Math.min(Constants.MAX_ATLAS_PAGES, device.limits.maxSampledTexturesPerShaderStage, device.limits.maxBindingsPerBindGroup - 2);
 
@@ -214,15 +240,123 @@ export class WebgpuContext extends Disposable {
       }
       const current = entry.pages[i]!;
       if (current.version !== page.version) {
-        this.device.queue.copyExternalImageToTexture(
-          { source: page.canvas, flipY: false },
-          { texture: current.texture, premultipliedAlpha: true, colorSpace: 'srgb' },
-          [page.canvas.width, page.canvas.height]
-        );
+        // Incremental version bumps upload only the dirty rectangles; a fresh
+        // page (undefined version, e.g. after a layout change or new texture)
+        // still does a full-page copy.
+        if (this.partialAtlasUpload && current.version !== undefined) {
+          this._uploadDirtyRects(current, page, atlas, i);
+        } else {
+          this._copyFullPage(current, page);
+        }
         current.version = page.version;
       }
     }
     return entry;
+  }
+
+  private _copyFullPage(current: IAtlasPageTexture, page: ITextureAtlas['pages'][number]): void {
+    this.device.queue.copyExternalImageToTexture(
+      { source: page.canvas, flipY: false },
+      { texture: current.texture, premultipliedAlpha: true, colorSpace: 'srgb' },
+      [page.canvas.width, page.canvas.height]
+    );
+  }
+
+  private _uploadDirtyRects(current: IAtlasPageTexture, page: ITextureAtlas['pages'][number], atlas: ITextureAtlas, pageIndex: number): void {
+    const rects = atlas.getDirtyRects(pageIndex, current.version!);
+    if (!rects.length) {
+      // No tracked rects newer than our last upload; fall back to a full copy
+      // rather than risk a stale texture.
+      this._copyFullPage(current, page);
+      return;
+    }
+    const ctx = page.canvas.getContext('2d');
+    if (!ctx) {
+      this._copyFullPage(current, page);
+      return;
+    }
+    // HYBRID gate: for small dirty bursts a single full-page copy is cheaper
+    // than a writeTexture partial upload, because copyExternalImageToTexture is
+    // a GPU->GPU transfer with no synchronous getImageData readback, whereas
+    // the partial path reads pixels back to the CPU (a GPU->CPU sync that
+    // dominates renderCpuMs on sparse frames). Only switch to the partial
+    // writeTexture path once a large burst makes the full-page copy expensive.
+    if (this.partialUploadThreshold > 0 && rects.length <= this.partialUploadThreshold) {
+      this._copyFullPage(current, page);
+      return;
+    }
+    // Merge adjacent/overlapping rects on the same row band into single spans.
+    const merged = mergeDirtyRects(rects);
+    const clamped: { x: number, y: number, width: number, height: number }[] = [];
+    for (const rect of merged) {
+      // Intersect the rect with the texture bounds, matching putImageData's
+      // clipping, so a leading-bearing glyph at the page origin can never
+      // produce an out-of-range (negative) writeTexture origin.
+      const left = Math.max(0, rect.x);
+      const top = Math.max(0, rect.y);
+      const right = Math.min(rect.x + rect.width, current.width);
+      const bottom = Math.min(rect.y + rect.height, current.height);
+      const width = right - left;
+      const height = bottom - top;
+      if (width > 0 && height > 0) {
+        clamped.push({ x: left, y: top, width, height });
+      }
+    }
+    if (!clamped.length) {
+      return;
+    }
+    // Read the union bounding box of all dirty rects in ONE getImageData call.
+    // getImageData is a synchronous GPU->CPU readback that dominates the upload
+    // path's JS cost (and therefore renderCpuMs), so avoid doing it per rect;
+    // each rect is then sliced out of the single readback.
+    const unionX = Math.min(...clamped.map(r => r.x));
+    const unionY = Math.min(...clamped.map(r => r.y));
+    const unionMaxX = Math.max(...clamped.map(r => r.x + r.width));
+    const unionMaxY = Math.max(...clamped.map(r => r.y + r.height));
+    let unionImage: ImageData;
+    try {
+      unionImage = ctx.getImageData(unionX, unionY, unionMaxX - unionX, unionMaxY - unionY);
+    } catch {
+      this._copyFullPage(current, page);
+      return;
+    }
+    const unionData = unionImage.data;
+    const unionW = unionImage.width;
+    for (const rect of clamped) {
+      try {
+        this._writeTextureRectFromUnion(current, unionData, unionX, unionY, unionW, rect);
+      } catch {
+        // Never let a partial upload break rendering: fall back to the
+        // full-page copy, which the version tracking below still covers.
+        this._copyFullPage(current, page);
+        return;
+      }
+    }
+  }
+
+  private _writeTextureRectFromUnion(current: IAtlasPageTexture, unionData: Uint8ClampedArray, unionX: number, unionY: number, unionW: number, rect: { x: number, y: number, width: number, height: number }): void {
+    const { x, y, width, height } = rect;
+    const srcOffsetX = x - unionX;
+    const srcOffsetY = y - unionY;
+    const srcBytesPerRow = unionW * 4;
+    const srcRowStart = srcOffsetY * srcBytesPerRow + srcOffsetX * 4;
+    // Write the pixels exactly as putImageData stored them. The full-page path
+    // (copyExternalImageToTexture with premultipliedAlpha: true) uploads those
+    // same raw bytes, so this keeps partial and full uploads byte-identical.
+    // writeTexture requires bytesPerRow to be a multiple of 256, so build a
+    // padded buffer and copy each source row into it.
+    const bytesPerRow = Math.ceil(width * 4 / 256) * 256;
+    const padded = new Uint8Array(bytesPerRow * height);
+    const srcBytes = width * 4;
+    for (let row = 0; row < height; row++) {
+      padded.set(unionData.subarray(srcRowStart + row * srcBytesPerRow, srcRowStart + row * srcBytesPerRow + srcBytes), row * bytesPerRow);
+    }
+    this.device.queue.writeTexture(
+      { texture: current.texture, origin: [x, y] },
+      padded,
+      { offset: 0, bytesPerRow, rowsPerImage: height },
+      [width, height]
+    );
   }
 
   private _ensureAtlasEntry(atlas: ITextureAtlas): IAtlasGpuTextures {
@@ -280,4 +414,42 @@ export class WebgpuContext extends Disposable {
       }
     }
   }
+}
+
+/**
+ * Merges overlapping/adjacent dirty rects that share the same row band (same
+ * top and height) into single horizontal spans. This preserves the exact
+ * painted pixels (no gaps are bridged) while drastically reducing the number of
+ * writeTexture calls and the bytesPerRow padding waste for narrow glyph rects.
+ */
+function mergeDirtyRects(rects: ReadonlyArray<{ x: number, y: number, width: number, height: number }>): { x: number, y: number, width: number, height: number }[] {
+  if (rects.length <= 1) {
+    return rects.slice();
+  }
+  const bands = new Map<string, { y: number, height: number, rects: { start: number, end: number }[] }>();
+  for (const rect of rects) {
+    const key = `${rect.y}:${rect.height}`;
+    let band = bands.get(key);
+    if (!band) {
+      band = { y: rect.y, height: rect.height, rects: [] };
+      bands.set(key, band);
+    }
+    band.rects.push({ start: rect.x, end: rect.x + rect.width });
+  }
+  const result: { x: number, y: number, width: number, height: number }[] = [];
+  for (const band of bands.values()) {
+    band.rects.sort((a, b) => a.start - b.start);
+    let current = band.rects[0];
+    for (let i = 1; i < band.rects.length; i++) {
+      const next = band.rects[i];
+      if (next.start <= current.end) {
+        current.end = Math.max(current.end, next.end);
+      } else {
+        result.push({ x: current.start, y: band.y, width: current.end - current.start, height: band.height });
+        current = next;
+      }
+    }
+    result.push({ x: current.start, y: band.y, width: current.end - current.start, height: band.height });
+  }
+  return result;
 }

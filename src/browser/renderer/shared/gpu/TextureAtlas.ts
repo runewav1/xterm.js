@@ -7,7 +7,7 @@ import { IColorContrastCache } from '../../../Types';
 import { DIM_OPACITY, TEXT_BASELINE } from './Constants';
 import { tryDrawCustomGlyph } from './customGlyphs/CustomGlyphRasterizer';
 import { computeNextVariantOffset, treatGlyphAsBackgroundColor, isPowerlineGlyph, isRestrictedPowerlineGlyph, throwIfFalsy } from '../RendererUtils';
-import { IBoundingBox, ICharAtlasConfig, IRasterizedGlyph, ITextureAtlas } from './Types';
+import { IBoundingBox, ICharAtlasConfig, IDirtyRect, IRasterizedGlyph, ITextureAtlas } from './Types';
 import { NULL_COLOR, channels, color, rgba } from '../../../../common/Color';
 import { FourKeyMap } from '../../../../common/MultiKeyMap';
 import { IdleTaskQueue } from '../../../../common/TaskQueue';
@@ -146,6 +146,20 @@ export class TextureAtlas implements ITextureAtlas {
 
   private _pageLayoutVersion = 0;
   public get pageLayoutVersion(): number { return this._pageLayoutVersion; }
+
+  public getDirtyRects(pageIndex: number, lastVersion: number): ReadonlyArray<IDirtyRect> {
+    const page = this._pages[pageIndex];
+    if (!page) {
+      return [];
+    }
+    const rects: IDirtyRect[] = [];
+    for (const rect of page.dirtyRects) {
+      if (rect.version > lastVersion) {
+        rects.push({ x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+      }
+    }
+    return rects;
+  }
 
   public clearTexture(): void {
     this._warmUpQueue.clear();
@@ -968,6 +982,22 @@ export class TextureAtlas implements ITextureAtlas {
     );
     activePage.addGlyph(rasterizedGlyph);
     activePage.version = ++AtlasPage.nextVersion;
+    // Record the region the GPU sampler reads for this glyph — [texturePosition,
+    // texturePosition + size) — NOT the paint destination (texturePosition minus
+    // the ink-box bearing). The shader only ever samples the former, so a
+    // partial upload of exactly that region is byte-identical to what the
+    // full-page copy would capture, regardless of where putImageData landed.
+    // Clamp to the page bounds so a partial upload can never be asked to write
+    // outside the texture.
+    const sampledX = rasterizedGlyph.texturePosition.x;
+    const sampledY = rasterizedGlyph.texturePosition.y;
+    const clampedX = Math.max(0, sampledX);
+    const clampedY = Math.max(0, sampledY);
+    const clampedWidth = Math.min(rasterizedGlyph.size.x, activePage.canvas.width - clampedX);
+    const clampedHeight = Math.min(rasterizedGlyph.size.y, activePage.canvas.height - clampedY);
+    if (clampedWidth > 0 && clampedHeight > 0) {
+      activePage.addDirtyRect(clampedX, clampedY, clampedWidth, clampedHeight, activePage.version);
+    }
 
     return rasterizedGlyph;
   }
@@ -1085,6 +1115,18 @@ class AtlasPage {
   public static nextVersion: number = 0;
   public version = ++AtlasPage.nextVersion;
 
+  /**
+   * Dirty rectangles drawn onto this page since the last reset, each tagged
+   * with the page version at which it was written. Kept append-only (resets on
+   * {@link clear} and on merge/evict) so multiple GPU consumers can each upload
+   * the same rects independently without a shared destructive cursor.
+   */
+  private readonly _dirtyRects: { x: number, y: number, width: number, height: number, version: number }[] = [];
+  public get dirtyRects(): ReadonlyArray<{ x: number, y: number, width: number, height: number, version: number }> { return this._dirtyRects; }
+  public addDirtyRect(x: number, y: number, width: number, height: number, version: number): void {
+    this._dirtyRects.push({ x, y, width, height, version });
+  }
+
   // Texture atlas current positioning data. The texture packing strategy used is to fill from
   // left-to-right and top-to-bottom. When the glyph being written is less than half of the current
   // row's height, the following happens:
@@ -1144,7 +1186,10 @@ class AtlasPage {
     this.fixedRows.length = 0;
     this._glyphs.length = 0;
     this._usedPixels = 0;
+    this._dirtyRects.length = 0;
     this.version = ++AtlasPage.nextVersion;
+    // The entire page changed, so a full-page dirty rect forces a full re-upload.
+    this._dirtyRects.push({ x: 0, y: 0, width: this.canvas.width, height: this.canvas.height, version: this.version });
   }
 }
 
