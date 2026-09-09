@@ -371,13 +371,23 @@ export class GpuRenderer extends Disposable implements IRenderer {
     // page's version, so re-run the update and force a full texture rebind.
     let merged = false;
     let mergeRetries = 0;
-    while (this._charAtlas && this._glyphRenderer.value.beginFrame() && mergeRetries++ < Constants.MERGE_RETRY_LIMIT) {
+    while (this._charAtlas && mergeRetries < Constants.MERGE_RETRY_LIMIT && this._glyphRenderer.value.beginFrame()) {
+      mergeRetries++;
       merged = true;
       this._clearModel(true);
       this._updateModel(0, this._terminal.rows - 1);
     }
     if (merged) {
       this._glyphRenderer.value.invalidateAtlasTextures();
+    }
+    // Do not probe beginFrame again after reaching the limit: it acknowledges
+    // the current pageLayoutVersion, so consuming another invalidation without
+    // rebuilding would submit stale glyph texture coordinates. Defer the frame
+    // and let the next render attempt either rebuild against the pending layout
+    // or establish that the atlas has stabilized.
+    if (mergeRetries === Constants.MERGE_RETRY_LIMIT) {
+      this._requestRedrawViewport();
+      return;
     }
 
     // Render

@@ -16,14 +16,21 @@ import type { IGpuBackend, IGlyphRenderer, IRectangleRenderer, IRenderModel } fr
 import { GpuRenderer } from './GpuRenderer';
 
 class FakeGlyphRenderer implements IGlyphRenderer {
+  public beginFrameCalls = 0;
   public clearCalls = 0;
-  public beginFrame(): boolean { return false; }
+  public invalidateAtlasTexturesCalls = 0;
+  public renderCalls = 0;
+  public beginFrameResults: boolean[] = [];
+  public beginFrame(): boolean {
+    this.beginFrameCalls++;
+    return this.beginFrameResults.shift() ?? false;
+  }
   public updateCell(): void {}
   public clear(): void { this.clearCalls++; }
   public handleResize(): void {}
-  public render(): void {}
+  public render(): void { this.renderCalls++; }
   public setAtlas(): void {}
-  public invalidateAtlasTextures(): void {}
+  public invalidateAtlasTextures(): void { this.invalidateAtlasTexturesCalls++; }
   public setDimensions(): void {}
   public dispose(): void {}
 }
@@ -45,11 +52,12 @@ class FakeBackend implements IGpuBackend {
   public readonly maxTextureSize = 8192;
   public readonly maxAtlasPages = 16;
   public readonly onContextLoss = new Emitter<void>().event;
+  public beginRenderCalls = 0;
   constructor(private readonly _glyphRenderer: IGlyphRenderer, private readonly _rectangleRenderer: IRectangleRenderer) {}
   public createRenderers(): { glyphRenderer: IGlyphRenderer, rectangleRenderer: IRectangleRenderer } {
     return { glyphRenderer: this._glyphRenderer, rectangleRenderer: this._rectangleRenderer };
   }
-  public beginRender(_dimensions: IRenderDimensions): void {}
+  public beginRender(_dimensions: IRenderDimensions): void { this.beginRenderCalls++; }
   public endRender(): void {}
   public dispose(): void {}
 }
@@ -111,7 +119,9 @@ describe('GpuRenderer', () => {
   let coreBrowserService: ICoreBrowserService;
   let coreBrowserState: { isFocused: boolean };
   let coreService: MockCoreService;
+  let glyphRenderer: FakeGlyphRenderer;
   let rectangleRenderer: FakeRectangleRenderer;
+  let backend: FakeBackend;
 
   beforeEach(() => {
     store = new DisposableStore();
@@ -127,9 +137,9 @@ describe('GpuRenderer', () => {
     coreBrowserService = coreBrowser.service;
     coreBrowserState = coreBrowser.state;
     coreService = new MockCoreService();
-    const glyphRenderer = new FakeGlyphRenderer();
+    glyphRenderer = new FakeGlyphRenderer();
     rectangleRenderer = new FakeRectangleRenderer();
-    const backend = new FakeBackend(glyphRenderer, rectangleRenderer);
+    backend = new FakeBackend(glyphRenderer, rectangleRenderer);
     const theme = new MockThemeService();
     theme.colors = { ...theme.colors, cursor: css.toColor('#ffffff'), cursorAccent: css.toColor('#000000') };
     renderer = store.add(new GpuRenderer(
@@ -239,5 +249,31 @@ describe('GpuRenderer', () => {
     (terminal as any)._core.buffer.ydisp = 10;
     updateModel(0, terminal.rows - 1);
     assert.strictEqual((renderer as any)._model.cursor, undefined);
+  });
+
+  it('defers rendering without consuming an atlas invalidation at the merge retry limit', () => {
+    // Initial invalidation plus 32 invalidations caused by consecutive model
+    // rebuilds reaches the retry limit. One more pending invalidation must be
+    // left for the next frame instead of being acknowledged and ignored.
+    (renderer as any)._isAttached = true;
+    (renderer as any)._charAtlas = {};
+    glyphRenderer.beginFrameResults = new Array(34).fill(true);
+    let redraws = 0;
+    store.add(renderer.onRequestRedraw(() => redraws++));
+
+    renderer.renderRows(0, terminal.rows - 1);
+
+    assert.strictEqual(glyphRenderer.beginFrameCalls, 33);
+    assert.strictEqual(glyphRenderer.beginFrameResults.length, 1);
+    assert.strictEqual(glyphRenderer.invalidateAtlasTexturesCalls, 1);
+    assert.strictEqual(backend.beginRenderCalls, 0);
+    assert.strictEqual(glyphRenderer.renderCalls, 0);
+    assert.strictEqual(redraws, 1);
+
+    renderer.renderRows(0, terminal.rows - 1);
+
+    assert.strictEqual(glyphRenderer.beginFrameResults.length, 0);
+    assert.strictEqual(backend.beginRenderCalls, 1);
+    assert.strictEqual(glyphRenderer.renderCalls, 1);
   });
 });

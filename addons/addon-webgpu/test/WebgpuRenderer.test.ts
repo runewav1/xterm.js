@@ -162,7 +162,10 @@ test.describe('WebGPU Renderer Integration Tests', () => {
     const cols = 40;
     const rows = 6;
     const col = 30;
-    for (const fontSize of [10, 12, 16]) {
+    // Fractional sizes are common when applications implement fine-grained
+    // terminal zoom controls. Keep these in the same backing-mismatch sweep as
+    // integer sizes so atlas metrics and grid positioning cannot drift apart.
+    for (const fontSize of [10, 10.25, 10.5, 10.75, 12, 16]) {
       for (const delta of [0, 1, -1, 8, -8]) {
         const scan = await readForcedBackingGlyphScan(ctx.page, cols, rows, col, fontSize, delta);
         const tag = `fontSize=${fontSize} delta=${delta}`;
