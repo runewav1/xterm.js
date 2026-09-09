@@ -36,7 +36,16 @@ interface IDrawRecord {
   byteLength: number;
   vertices: number;
   instances: number;
+  firstInstance: number;
   submitted?: Float32Array;
+}
+
+interface ICopyRecord {
+  source: Parameters<GPUQueue['copyExternalImageToTexture']>[0];
+  destination: Parameters<GPUQueue['copyExternalImageToTexture']>[1];
+  size: number[];
+  sourceOrigin: number[];
+  destinationOrigin: number[];
 }
 
 function createFakeGpu() {
@@ -45,7 +54,7 @@ function createFakeGpu() {
   const buffers: IBufferRecord[] = [];
   const textures: ITextureRecord[] = [];
   const writes: { buffer: GPUBuffer, offset: number, byteLength: number, data: Float32Array }[] = [];
-  const copies: { source: Parameters<GPUQueue['copyExternalImageToTexture']>[0], destination: Parameters<GPUQueue['copyExternalImageToTexture']>[1] }[] = [];
+  const copies: ICopyRecord[] = [];
   const textureWrites: { texture: GPUTexture, origin: number[], size: number[], data: Uint8Array, bytesPerRow: number, rowsPerImage: number }[] = [];
   const draws: IDrawRecord[] = [];
   const pipelines: GPURenderPipelineDescriptor[] = [];
@@ -122,8 +131,8 @@ function createFakeGpu() {
           buffer = value;
           byteLength = size;
         },
-        draw: (vertices: number, instances: number) => {
-          const draw = { pipeline: pipeline.label, buffer, byteLength, vertices, instances };
+        draw: (vertices: number, instances: number, _firstVertex?: number, firstInstance?: number) => {
+          const draw = { pipeline: pipeline.label, buffer, byteLength, vertices, instances, firstInstance: firstInstance ?? 0 };
           frameDraws.push(draw);
           draws.push(draw);
           events.push(`draw:${buffer.label}`);
@@ -153,8 +162,15 @@ function createFakeGpu() {
         writes.push({ buffer, offset, byteLength: source.byteLength, data: new Float32Array(source.slice().buffer) });
         events.push(`write:${buffer.label}`);
       },
-      copyExternalImageToTexture: (source: Parameters<GPUQueue['copyExternalImageToTexture']>[0], destination: Parameters<GPUQueue['copyExternalImageToTexture']>[1]) => {
-        copies.push({ source, destination });
+      copyExternalImageToTexture: (source: Parameters<GPUQueue['copyExternalImageToTexture']>[0], destination: Parameters<GPUQueue['copyExternalImageToTexture']>[1], copySize: GPUExtent3D) => {
+        const size = Array.from(copySize as Iterable<number>);
+        const sourceOrigin = Array.from((source as { origin?: Iterable<number> }).origin ?? [0, 0]);
+        const destinationOrigin = Array.from((destination as { origin?: Iterable<number> }).origin ?? [0, 0]);
+        assert.deepStrictEqual(sourceOrigin, destinationOrigin, 'subrect copies must use the same source and destination origin');
+        const sourceCanvas = source.source as unknown as { width: number, height: number };
+        assert.isAtMost(sourceOrigin[0] + size[0], sourceCanvas.width);
+        assert.isAtMost(sourceOrigin[1] + size[1], sourceCanvas.height);
+        copies.push({ source, destination, size: [size[0], size[1]], sourceOrigin: [sourceOrigin[0], sourceOrigin[1]], destinationOrigin: [destinationOrigin[0], destinationOrigin[1]] });
         events.push('copy');
       },
       writeTexture: (destination: { texture: GPUTexture, origin?: number[] }, data: Uint8Array, dataLayout: { offset: number, bytesPerRow: number, rowsPerImage: number }, size: number[]) => {
@@ -182,42 +198,17 @@ interface ITestAtlasPage {
   dirtyRects: { x: number, y: number, width: number, height: number, version: number }[];
 }
 
-interface IFakeCanvas {
-  canvas: HTMLCanvasElement;
-  pixels: Uint8ClampedArray;
-}
-
-function fakeCanvas(width = 64, height = 64): IFakeCanvas {
-  const pixels = new Uint8ClampedArray(width * height * 4);
+function fakeCanvas(width = 64, height = 64): HTMLCanvasElement {
   return {
-    canvas: {
-      width, height,
-      getContext: (type: string) => {
-        if (type !== '2d') {
-          return null;
-        }
-        return {
-          getImageData: (x: number, y: number, w: number, h: number) => {
-            // Crop the backing store like a real canvas so the WebGPU backend's
-            // union readback sees pixels at their true page coordinates.
-            const out = new Uint8ClampedArray(w * h * 4);
-            for (let row = 0; row < h; row++) {
-              const src = ((y + row) * width + x) * 4;
-              out.set(pixels.subarray(src, src + w * 4), row * w * 4);
-            }
-            return { data: out, width: w, height: h } as unknown as ImageData;
-          }
-        } as unknown as CanvasRenderingContext2D;
-      }
-    } as unknown as HTMLCanvasElement,
-    pixels
-  };
+    width, height,
+    getContext: () => null
+  } as unknown as HTMLCanvasElement;
 }
 
 class TestAtlas extends Disposable implements ITextureAtlas {
   public readonly pages: ITestAtlasPage[] = [
-    { canvas: fakeCanvas().canvas, version: 1, dirtyRects: [] },
-    { canvas: fakeCanvas().canvas, version: 1, dirtyRects: [] }
+    { canvas: fakeCanvas(), version: 1, dirtyRects: [] },
+    { canvas: fakeCanvas(), version: 1, dirtyRects: [] }
   ];
   public pageLayoutVersion = 0;
   public readonly onAddTextureAtlasCanvas = this._register(new Emitter<HTMLCanvasElement>()).event;
@@ -279,7 +270,7 @@ describe('WebgpuBackend', () => {
     }
     gpu = createFakeGpu();
     context = store.add(new WebgpuContext(gpu.device, 'bgra8unorm'));
-    // Force the partial writeTexture path for small bursts in these unit tests;
+    // Force the partial subrect copy path for small bursts in these unit tests;
     // the hybrid threshold is exercised by its own dedicated test below.
     context.partialUploadThreshold = 0;
     backend = store.add(new WebgpuBackend(gpu.canvas, context));
@@ -527,6 +518,65 @@ describe('WebgpuBackend', () => {
     assert.deepStrictEqual(glyphWrites().map(e => [e.offset, e.byteLength]), [[0, 4 * 44], [3 * 4 * 44, 4 * 44]]);
   });
 
+  function glyphDraws() {
+    return gpu.draws.filter(e => e.buffer.label === 'xterm glyphs');
+  }
+
+  it('draws a dense full grid as one coalesced draw', () => {
+    for (let y = 0; y < terminal.rows; y++) {
+      for (let x = 0; x < terminal.cols; x++) {
+        update(x, y);
+      }
+    }
+    frame();
+    assert.deepStrictEqual(glyphDraws().map(d => [d.instances, d.firstInstance]), [[terminal.rows * terminal.cols, 0]]);
+  });
+
+  it('coalesces contiguous full rows but keeps partial rows as separate draws', () => {
+    glyphRenderer.clear();
+    for (let x = 0; x < terminal.cols; x++) {
+      update(x, 0);
+      update(x, 1);
+    }
+    update(0, 2);
+    update(1, 2);
+    model.lineLengths[2] = 2;
+    frame();
+    assert.deepStrictEqual(glyphDraws().map(d => [d.instances, d.firstInstance]), [[8, 0], [2, 8]]);
+  });
+
+  it('draws sparse rows individually with gaps excluded', () => {
+    glyphRenderer.clear();
+    for (let x = 0; x < terminal.cols; x++) {
+      update(x, 0);
+      update(x, 3);
+    }
+    update(0, 2);
+    update(1, 2);
+    model.lineLengths[1] = 0;
+    model.lineLengths[2] = 2;
+    frame();
+    assert.deepStrictEqual(glyphDraws().map(d => [d.instances, d.firstInstance]), [[4, 0], [2, 8], [4, 12]]);
+  });
+
+  it('keeps uploads zero on unchanged frames while coalesced draws still issue', () => {
+    for (let y = 0; y < terminal.rows; y++) {
+      for (let x = 0; x < terminal.cols; x++) {
+        update(x, y);
+      }
+    }
+    frame();
+    assert.isAbove(glyphWrites().length, 0);
+    gpu.writes.length = 0;
+    gpu.copies.length = 0;
+    gpu.draws.length = 0;
+    assert.strictEqual(glyphRenderer.beginFrame(), false);
+    frame();
+    assert.strictEqual(glyphWrites().length, 0);
+    assert.strictEqual(gpu.copies.length, 0);
+    assert.deepStrictEqual(glyphDraws().map(d => [d.instances, d.firstInstance]), [[terminal.rows * terminal.cols, 0]]);
+  });
+
   it('redraws unchanged backgrounds without uploads, including cursor-only frames', () => {
     frame();
     gpu.writes.length = 0;
@@ -611,50 +661,34 @@ describe('WebgpuBackend', () => {
     assert.strictEqual(gpu.bindGroups.length, bindGroupCount);
   });
 
-  it('uploads only the dirty rect via writeTexture for an incremental glyph, byte-identical to the full-page path', () => {
-    const w = 10;
-    const h = 20;
-    const fc = fakeCanvas(64, 64);
+  it('uploads only the dirty rect via a copyExternalImageToTexture subrect with full-page alpha semantics', () => {
+    const pageCanvas = fakeCanvas(64, 64);
     const page = atlas.pages[1] as ITestAtlasPage;
-    page.canvas = fc.canvas;
+    page.canvas = pageCanvas;
     frame();
+    const pageTexture = gpu.textures[2].texture;
     gpu.copies.length = 0;
     gpu.textureWrites.length = 0;
-    // The rect is {5,7,10,20}; place test pixels at their true page coordinates
-    // (the union readback crops from (5,7)).
-    const origin = (7 * 64 + 5) * 4;
-    fc.pixels[origin] = 200; fc.pixels[origin + 1] = 0; fc.pixels[origin + 2] = 0; fc.pixels[origin + 3] = 128;
-    const opaque = (10 * 64 + 7) * 4;
-    fc.pixels[opaque] = 0; fc.pixels[opaque + 1] = 255; fc.pixels[opaque + 2] = 0; fc.pixels[opaque + 3] = 255;
     const base = page.version;
-    page.dirtyRects = [{ x: 5, y: 7, width: w, height: h, version: base + 1 }];
+    page.dirtyRects = [{ x: 5, y: 7, width: 10, height: 20, version: base + 1 }];
     page.version = base + 1;
     frame();
-    assert.strictEqual(gpu.copies.length, 0);
-    assert.strictEqual(gpu.textureWrites.length, 1);
-    const tw = gpu.textureWrites[0];
-    assert.deepStrictEqual(tw.origin, [5, 7]);
-    assert.deepStrictEqual(tw.size, [w, h]);
-    const expectedBytesPerRow = Math.ceil(w * 4 / 256) * 256;
-    assert.strictEqual(tw.bytesPerRow, expectedBytesPerRow);
-    assert.strictEqual(tw.rowsPerImage, h);
-    // Bytes must match putImageData's output (straight alpha), exactly like the
-    // full-page copyExternalImageToTexture path.
-    assert.strictEqual(tw.data[0], 200);
-    assert.strictEqual(tw.data[1], 0);
-    assert.strictEqual(tw.data[2], 0);
-    assert.strictEqual(tw.data[3], 128);
-    const opaqueOffset = 3 * expectedBytesPerRow + 2 * 4;
-    assert.strictEqual(tw.data[opaqueOffset], 0);
-    assert.strictEqual(tw.data[opaqueOffset + 1], 255);
-    assert.strictEqual(tw.data[opaqueOffset + 2], 0);
-    assert.strictEqual(tw.data[opaqueOffset + 3], 255);
+    assert.strictEqual(gpu.copies.length, 1);
+    assert.strictEqual(gpu.textureWrites.length, 0);
+    const copy = gpu.copies[0];
+    assert.strictEqual(copy.source.source, pageCanvas);
+    assert.deepStrictEqual(copy.sourceOrigin, [5, 7]);
+    assert.deepStrictEqual(copy.destinationOrigin, [5, 7]);
+    assert.deepStrictEqual(copy.size, [10, 20]);
+    assert.strictEqual(copy.destination.texture, pageTexture);
+    assert.strictEqual(copy.source.flipY, false);
+    assert.strictEqual(copy.destination.premultipliedAlpha, true);
+    assert.strictEqual(copy.destination.colorSpace, 'srgb');
   });
 
   it('uploads each dirty rect once for a burst of glyph insertions', () => {
-    const fc = fakeCanvas(128, 128);
     const page = atlas.pages[0] as ITestAtlasPage;
-    page.canvas = fc.canvas;
+    page.canvas = fakeCanvas(128, 128);
     frame();
     gpu.copies.length = 0;
     gpu.textureWrites.length = 0;
@@ -666,16 +700,16 @@ describe('WebgpuBackend', () => {
     ];
     page.version = base + 3;
     frame();
-    assert.strictEqual(gpu.copies.length, 0);
-    assert.strictEqual(gpu.textureWrites.length, 3);
-    assert.deepStrictEqual(gpu.textureWrites.map(t => t.origin), [[0, 0], [20, 30], [40, 50]]);
-    assert.deepStrictEqual(gpu.textureWrites.map(t => t.size), [[10, 20], [10, 20], [10, 20]]);
+    assert.strictEqual(gpu.copies.length, 3);
+    assert.strictEqual(gpu.textureWrites.length, 0);
+    assert.deepStrictEqual(gpu.copies.map(c => c.sourceOrigin), [[0, 0], [20, 30], [40, 50]]);
+    assert.deepStrictEqual(gpu.copies.map(c => c.destinationOrigin), [[0, 0], [20, 30], [40, 50]]);
+    assert.deepStrictEqual(gpu.copies.map(c => c.size), [[10, 20], [10, 20], [10, 20]]);
   });
 
-  it('clamps dirty rects to the page bounds so a leading-bearing glyph at the origin never yields a negative origin', () => {
-    const fc = fakeCanvas();
+  it('clamps dirty rects to the page bounds so a leading-bearing glyph at the origin never yields a negative copy origin', () => {
     const page = atlas.pages[0] as ITestAtlasPage;
-    page.canvas = fc.canvas;
+    page.canvas = fakeCanvas();
     frame();
     gpu.copies.length = 0;
     gpu.textureWrites.length = 0;
@@ -685,16 +719,16 @@ describe('WebgpuBackend', () => {
     page.dirtyRects = [{ x: -2, y: -1, width: 10, height: 20, version: base + 1 }];
     page.version = base + 1;
     frame();
-    assert.strictEqual(gpu.copies.length, 0);
-    assert.strictEqual(gpu.textureWrites.length, 1);
-    assert.deepStrictEqual(gpu.textureWrites[0].origin, [0, 0]);
-    assert.deepStrictEqual(gpu.textureWrites[0].size, [8, 19]);
+    assert.strictEqual(gpu.copies.length, 1);
+    assert.strictEqual(gpu.textureWrites.length, 0);
+    assert.deepStrictEqual(gpu.copies[0].sourceOrigin, [0, 0]);
+    assert.deepStrictEqual(gpu.copies[0].destinationOrigin, [0, 0]);
+    assert.deepStrictEqual(gpu.copies[0].size, [8, 19]);
   });
 
   it('skips dirty rects that fall entirely outside the page', () => {
-    const fc = fakeCanvas();
     const page = atlas.pages[0] as ITestAtlasPage;
-    page.canvas = fc.canvas;
+    page.canvas = fakeCanvas();
     frame();
     gpu.copies.length = 0;
     gpu.textureWrites.length = 0;
@@ -726,14 +760,13 @@ describe('WebgpuBackend', () => {
     assert.strictEqual(gpu.textureWrites.length, 0);
   });
 
-  it('hybrid gate: small dirty bursts use a full-page copy, large bursts use writeTexture', () => {
+  it('hybrid gate: small dirty bursts use a full-page copy, large bursts use subrect copies', () => {
     // Fresh context with the default threshold (32).
     const hybridContext = store.add(new WebgpuContext(gpu.device, 'bgra8unorm'));
     const hybridBackend = store.add(new WebgpuBackend(gpu.canvas, hybridContext));
     const { glyphRenderer: glyphH } = hybridBackend.createRenderers(terminal, dimensions, new MockOptionsService(), theme, new MockLogService());
-    const fc = fakeCanvas(256, 256);
     const page = atlas.pages[0] as ITestAtlasPage;
-    page.canvas = fc.canvas;
+    page.canvas = fakeCanvas(256, 256);
     glyphH.setAtlas(atlas);
     glyphH.beginFrame();
     hybridBackend.beginRender();
@@ -742,7 +775,7 @@ describe('WebgpuBackend', () => {
     gpu.copies.length = 0;
     gpu.textureWrites.length = 0;
 
-    // Small burst (1 rect) must take the full-copy path (no readback).
+    // Small burst (1 rect) must take the full-copy path (no partial subrects).
     const base = page.version;
     page.dirtyRects = [{ x: 0, y: 0, width: 10, height: 20, version: base + 1 }];
     page.version = base + 1;
@@ -751,9 +784,10 @@ describe('WebgpuBackend', () => {
     glyphH.render(model);
     hybridBackend.endRender();
     assert.strictEqual(gpu.copies.length, 1, 'small burst should use a full-page copy');
+    assert.deepStrictEqual(gpu.copies[0].size, [256, 256], 'small burst copy must cover the full page');
     assert.strictEqual(gpu.textureWrites.length, 0, 'small burst must not use writeTexture');
 
-    // Large burst (>32 rects) must use the partial writeTexture path.
+    // Large burst (>32 rects) must use the partial subrect copy path.
     gpu.copies.length = 0;
     gpu.textureWrites.length = 0;
     const base2 = page.version;
@@ -763,14 +797,16 @@ describe('WebgpuBackend', () => {
     hybridBackend.beginRender();
     glyphH.render(model);
     hybridBackend.endRender();
-    assert.strictEqual(gpu.copies.length, 0, 'large burst must not use a full-page copy');
-    assert.ok(gpu.textureWrites.length > 0, 'large burst should use writeTexture');
+    assert.isAbove(gpu.copies.length, 1, 'large burst should use multiple subrect copies');
+    assert.ok(gpu.copies.every(c => c.size[0] < 256), 'large burst copies must be subrects, not the full page');
+    assert.ok(gpu.copies.every(c => c.destination.premultipliedAlpha === true), 'subrect copies must use premultipliedAlpha');
+    assert.ok(gpu.copies.every(c => c.destination.colorSpace === 'srgb'), 'subrect copies must use srgb color space');
+    assert.strictEqual(gpu.textureWrites.length, 0, 'large burst must not use writeTexture');
   });
 
   it('lets separate contexts upload dirty rects independently', () => {
-    const fc = fakeCanvas();
     const page = atlas.pages[0] as ITestAtlasPage;
-    page.canvas = fc.canvas;
+    page.canvas = fakeCanvas();
     frame();
     const secondContext = store.add(new WebgpuContext(gpu.device, 'bgra8unorm'));
     secondContext.partialUploadThreshold = 0;
@@ -789,13 +825,16 @@ describe('WebgpuBackend', () => {
     backend.beginRender();
     glyphRenderer.render(model);
     backend.endRender();
-    assert.strictEqual(gpu.copies.length, 0);
-    assert.strictEqual(gpu.textureWrites.length, 1);
+    assert.strictEqual(gpu.copies.length, 1);
+    assert.strictEqual(gpu.textureWrites.length, 0);
     secondBackend.beginRender();
     glyphB.render(model);
     secondBackend.endRender();
-    assert.strictEqual(gpu.textureWrites.length, 2);
-    assert.deepStrictEqual(gpu.textureWrites[1].origin, [3, 4]);
+    assert.strictEqual(gpu.copies.length, 2);
+    assert.strictEqual(gpu.textureWrites.length, 0);
+    assert.deepStrictEqual(gpu.copies[1].sourceOrigin, [3, 4]);
+    assert.deepStrictEqual(gpu.copies[1].destinationOrigin, [3, 4]);
+    assert.deepStrictEqual(gpu.copies[1].size, [10, 20]);
   });
 
   it('invalidates atlas textures for page identity, canvas identity and dimensions', () => {

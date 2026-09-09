@@ -42,6 +42,7 @@ export class GpuRenderer extends Disposable implements IRenderer {
   private _model: RenderModel = new RenderModel();
   private _rowHasBlinkingCells: boolean[] = [];
   private _rowHasBlinkingCellsCount: number = 0;
+  private _forceBackgroundUpdate: boolean = false;
   private _workCell: ICellData = new CellData();
   private _cellColorResolver: CellColorResolver;
 
@@ -306,6 +307,11 @@ export class GpuRenderer extends Disposable implements IRenderer {
    */
   private _clearModel(clearGlyphRenderer: boolean): void {
     this._model.clear();
+    // The background rectangle caches live in the rectangle renderer and are not
+    // invalidated by clearing the model. Force the next update to rescan the
+    // whole viewport, otherwise a stale cache survives even when the re-render
+    // is entirely blank/default and compares equal to the cleared model.
+    this._forceBackgroundUpdate = true;
     if (clearGlyphRenderer) {
       this._glyphRenderer.value?.clear();
     }
@@ -431,7 +437,6 @@ export class GpuRenderer extends Disposable implements IRenderer {
     const cursorStyle = this._coreService.decPrivateModes.cursorStyle ?? terminal.options.cursorStyle ?? 'block';
 
     const cursorY = this._terminal.buffer.active.baseY + this._terminal.buffer.active.cursorY;
-    const viewportRelativeCursorY = cursorY - terminal.buffer.ydisp;
     // in case cursor.x == cols adjust visual cursor to cols - 1
     const cursorX = Math.min(this._terminal.buffer.active.cursorX, terminal.cols - 1);
     let lastCursorX = -1;
@@ -439,8 +444,11 @@ export class GpuRenderer extends Disposable implements IRenderer {
       this._coreService.isCursorInitialized &&
       !this._coreService.isCursorHidden &&
       (!this._cursorBlinkStateManager.value || this._cursorBlinkStateManager.value.isCursorVisible);
-    this._model.cursor = undefined;
-    let modelUpdated = false;
+    // Compute the cursor model independently of the dirty row range so that an
+    // unrelated refresh (e.g. scrolled content) preserves bar/underline/outline
+    // cursors instead of clearing them and never rebuilding them.
+    this._updateCursorModel();
+    let backgroundUpdated = false;
 
     for (y = start; y <= end; y++) {
       row = y + terminal.buffer.ydisp;
@@ -449,7 +457,9 @@ export class GpuRenderer extends Disposable implements IRenderer {
         this._model.lineLengths[y] = 0;
         for (x = 0; x < terminal.cols; x++) {
           j = ((y * terminal.cols) + x) * RenderModelConstants.INDICIES_PER_CELL;
-          modelUpdated = true;
+          // _nullModelCell bypasses the change comparison in the main loop, so
+          // conservatively flag the background as dirty too.
+          backgroundUpdated = true;
           this._nullModelCell(x, y, j, 0, 0, 0);
         }
         this._setRowBlinkState(y, false);
@@ -524,14 +534,6 @@ export class GpuRenderer extends Disposable implements IRenderer {
         // Override colors for cursor cell
         if (isCursorVisible && row === cursorY) {
           if (x === cursorX) {
-            this._model.cursor = {
-              x: cursorX,
-              y: viewportRelativeCursorY,
-              width: cell.getWidth(),
-              style: this._coreBrowserService.isFocused ? cursorStyle : terminal.options.cursorInactiveStyle,
-              cursorWidth: terminal.options.cursorWidth,
-              dpr: this._devicePixelRatio
-            };
             lastCursorX = cursorX + cell.getWidth() - 1;
           }
           if (x >= cursorX && x <= lastCursorX &&
@@ -563,7 +565,15 @@ export class GpuRenderer extends Disposable implements IRenderer {
           continue;
         }
 
-        modelUpdated = true;
+        // Background rectangles only depend on the background color and the
+        // inverse foreground flag, so text/foreground-only changes can skip the
+        // background repack. Joined ranges null out cells without going through
+        // this comparison, so treat them conservatively.
+        if (isJoined ||
+            this._model.cells[i + RenderModelConstants.BG_OFFSET] !== this._cellColorResolver.result.bg ||
+            ((this._model.cells[i + RenderModelConstants.FG_OFFSET] ^ this._cellColorResolver.result.fg) & FgFlags.INVERSE)) {
+          backgroundUpdated = true;
+        }
 
         // Flag combined chars with a bit mask so they're easily identifiable
         if (chars.length > 1) {
@@ -595,11 +605,57 @@ export class GpuRenderer extends Disposable implements IRenderer {
       }
       this._setRowBlinkState(y, rowHasBlinkingCells);
     }
-    if (modelUpdated) {
+    if (this._forceBackgroundUpdate) {
+      // The model was cleared so every cached background row must be rescanned,
+      // not just the dirty range. This also guarantees the viewport-clear
+      // rectangle is present even when the whole screen is blank/default.
+      this._forceBackgroundUpdate = false;
+      this._rectangleRenderer.value!.updateBackgrounds(this._model, 0, terminal.rows - 1);
+    } else if (backgroundUpdated) {
       this._rectangleRenderer.value!.updateBackgrounds(this._model, start, end);
     }
     this._rectangleRenderer.value!.updateCursor(this._model);
     this._updateTextBlinkState();
+  }
+
+  /**
+   * Computes the cursor render model independently of the dirty row range so an
+   * unrelated refresh (e.g. scrolled content) preserves bar/underline/outline
+   * cursors. The block cursor does not need this model as it is baked into the
+   * cell's background color while the cursor row is refreshed.
+   */
+  private _updateCursorModel(): void {
+    this._model.cursor = undefined;
+    if (!this._coreService.isCursorInitialized || this._coreService.isCursorHidden) {
+      return;
+    }
+    if (this._cursorBlinkStateManager.value && !this._cursorBlinkStateManager.value.isCursorVisible) {
+      return;
+    }
+    const terminal = this._core;
+    const cursorY = this._terminal.buffer.active.baseY + this._terminal.buffer.active.cursorY;
+    const viewportRelativeCursorY = cursorY - terminal.buffer.ydisp;
+    // The cursor is not rendered when it is scrolled out of the viewport.
+    if (viewportRelativeCursorY < 0 || viewportRelativeCursorY >= terminal.rows) {
+      return;
+    }
+    const bufferLine = terminal.buffer.lines.get(cursorY);
+    if (!bufferLine) {
+      return;
+    }
+    // in case cursor.x == cols adjust visual cursor to cols - 1
+    const cursorX = Math.min(this._terminal.buffer.active.cursorX, terminal.cols - 1);
+    const cell = this._workCell;
+    bufferLine.loadCell(cursorX, cell);
+    const cursorStyle = this._coreService.decPrivateModes.cursorStyle ?? terminal.options.cursorStyle ?? 'block';
+    this._model.cursor = {
+      x: cursorX,
+      y: viewportRelativeCursorY,
+      width: cell.getWidth(),
+      style: this._coreBrowserService.isFocused ? cursorStyle : terminal.options.cursorInactiveStyle,
+      cursorWidth: terminal.options.cursorWidth,
+      dpr: this._devicePixelRatio
+    };
   }
 
   private _nullModelCell(x: number, y: number, cellIndex: number, bg: number, fg: number, ext: number): void {

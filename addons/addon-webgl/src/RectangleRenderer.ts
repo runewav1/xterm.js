@@ -49,7 +49,8 @@ void main() {
 }`;
 
 const enum Constants {
-  BYTES_PER_RECTANGLE = 8 * 4
+  BYTES_PER_RECTANGLE = 8 * 4,
+  FLOATS_PER_RECTANGLE = 8
 }
 
 export class RectangleRenderer extends Disposable implements IRectangleRenderer {
@@ -117,12 +118,16 @@ export class RectangleRenderer extends Disposable implements IRectangleRenderer 
   }
 
   private _renderVertices(vertices: { attributes: Float32Array, count: number }): void {
+    if (vertices.count === 0) {
+      return;
+    }
     const gl = this._gl;
     gl.useProgram(this._program);
     gl.bindVertexArray(this._vertexArrayObject);
     gl.uniformMatrix4fv(this._projectionLocation, false, PROJECTION_MATRIX);
     gl.bindBuffer(gl.ARRAY_BUFFER, this._attributesBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, vertices.attributes, gl.DYNAMIC_DRAW);
+    // Upload only the used rectangles rather than the full backing capacity.
+    gl.bufferData(gl.ARRAY_BUFFER, vertices.attributes.subarray(0, vertices.count * Constants.FLOATS_PER_RECTANGLE), gl.DYNAMIC_DRAW);
     gl.drawElementsInstanced(gl.TRIANGLE_STRIP, 4, gl.UNSIGNED_BYTE, 0, vertices.count);
   }
 

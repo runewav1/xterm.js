@@ -16,12 +16,14 @@ import { WebgpuContext } from './WebgpuContext';
 /**
  * A shared WebGPU device + context for one webview. Create one session, then a
  * {@link WebgpuAddon} per terminal; all panes share the device, pipelines and
- * GPU atlas textures. Disposal destroys the device; createAddon() addons are
- * disposed independently without affecting the session.
+ * GPU atlas textures. Disposal restores the DOM renderer on every active pane
+ * and destroys the device; createAddon() addons are otherwise disposed
+ * independently without affecting the session.
  */
 export class WebgpuSession extends Disposable implements IWebgpuSessionApi {
   private readonly _device: GPUDevice;
   private readonly _context: WebgpuContext;
+  private readonly _addons = new Set<WebgpuAddon>();
   private readonly _onContextLoss = this._register(new Emitter<void>());
   public readonly onContextLoss = this._onContextLoss.event;
   private readonly _onError = this._register(new Emitter<Error>());
@@ -32,7 +34,15 @@ export class WebgpuSession extends Disposable implements IWebgpuSessionApi {
     this._device = device;
     this._context = context;
     this._register(EventUtils.forward(context.onContextLoss, this._onContextLoss));
-    this._register(EventUtils.forward(context.onError, this._onError));
+    this._register(context.onError(error => {
+      // Pane addons restore DOM synchronously in their own onError handlers;
+      // defer the session event so consumers observe it after the fallback.
+      Promise.resolve().then(() => {
+        if (!this._store.isDisposed) {
+          this._onError.fire(error);
+        }
+      });
+    }));
   }
 
   public static async create(options: IWebgpuAddonOptions = {}): Promise<WebgpuSession> {
@@ -49,13 +59,26 @@ export class WebgpuSession extends Disposable implements IWebgpuSessionApi {
   }
 
   public createAddon(customGlyphs: boolean = true): WebgpuAddon {
-    return WebgpuAddon.createForSession(this._context, this._device, customGlyphs);
+    if (this._store.isDisposed || this._context.lost) {
+      throw new Error('Cannot create a WebGPU addon from a disposed or lost session');
+    }
+    const addon = WebgpuAddon.createForSession(this._context, this._device, customGlyphs, () => this._addons.delete(addon));
+    this._addons.add(addon);
+    return addon;
   }
 
   public override dispose(): void {
     if (this._store.isDisposed) {
       return;
     }
+    // Dispose session-created addons before the shared context and device are
+    // torn down: active panes restore the DOM renderer and deferred addons
+    // cancel their pending activation. The context suppresses device.lost once
+    // disposed, which would otherwise strand panes on a destroyed device.
+    for (const addon of Array.from(this._addons)) {
+      addon.dispose();
+    }
+    this._addons.clear();
     super.dispose();
     this._context.dispose();
     this._device.destroy();
@@ -92,15 +115,16 @@ export class WebgpuAddon extends Disposable implements ITerminalAddon, IWebgpuAp
   }
 
   /** Internal: create an addon bound to a shared session context. */
-  public static createForSession(context: WebgpuContext, device: GPUDevice, customGlyphs: boolean): WebgpuAddon {
-    return new WebgpuAddon(context, device, customGlyphs, false);
+  public static createForSession(context: WebgpuContext, device: GPUDevice, customGlyphs: boolean, onDispose?: () => void): WebgpuAddon {
+    return new WebgpuAddon(context, device, customGlyphs, false, onDispose);
   }
 
   private constructor(
     private readonly _context: WebgpuContext,
     private readonly _device: GPUDevice,
     private readonly _customGlyphs: boolean,
-    private readonly _ownsDevice: boolean
+    private readonly _ownsDevice: boolean,
+    private readonly _onDispose?: () => void
   ) {
     super();
     this._register(this._context.onContextLoss(() => {
@@ -179,6 +203,7 @@ export class WebgpuAddon extends Disposable implements ITerminalAddon, IWebgpuAp
     }
     this._restoreRenderer();
     super.dispose();
+    this._onDispose?.();
     if (this._ownsDevice) {
       this._context.dispose();
       this._device.destroy();

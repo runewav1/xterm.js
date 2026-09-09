@@ -234,13 +234,26 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
     // off the GPU entirely, which is the dominant renderCpuMs gap vs WebGL on
     // SwiftShader (a full-grid draw of degenerate empty cells is expensive).
     // Instance data uses stepMode:'instance', so firstInstance selects the row
-    // offset within the persistent row-major buffer.
+    // offset within the persistent row-major buffer. Contiguous full rows are
+    // coalesced into a single draw since their instance ranges are contiguous,
+    // while partial rows and gaps draw individually in order.
     const cols = rowLength / Constants.FLOATS_PER_GLYPH;
     if (lineLengths && lineLengths.length) {
-      for (let y = 0; y < lineLengths.length; y++) {
+      for (let y = 0; y < lineLengths.length;) {
         const len = lineLengths[y];
-        if (len > 0) {
+        if (len === 0) {
+          y++;
+          continue;
+        }
+        if (len === cols) {
+          const start = y;
+          do {
+            y++;
+          } while (y < lineLengths.length && lineLengths[y] === cols);
+          pass.draw(4, (y - start) * cols, 0, start * cols);
+        } else {
           pass.draw(4, len, 0, y * cols);
+          y++;
         }
       }
     } else {

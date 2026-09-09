@@ -32,6 +32,11 @@ export class RenderModel implements IRenderModel {
     const indexCount = cols * rows * RenderModelConstants.INDICIES_PER_CELL;
     if (indexCount !== this.cells.length) {
       this.cells = new Uint32Array(indexCount);
+    }
+    // Resize the row array independently of the cell array. Different col/row
+    // combinations can produce the same cell count (e.g. 80x24 and 40x48) but
+    // the number of rows still differs, so lineLengths must be rebuilt.
+    if (rows !== this.lineLengths.length) {
       this.lineLengths = new Uint32Array(rows);
     }
   }

@@ -305,6 +305,113 @@ test.describe('WebGPU lifecycle and device validation', () => {
     expect(Array.from(shot.data.slice(pixel, pixel + 4)), 'cursor cell must be the cursor color').toEqual([0, 0, 255, 255]);
   });
 
+  test('session disposal restores DOM on every active pane before destroying the device', async () => {
+    await openTerminal(ctx, { cols: 20, rows: 4 });
+    await ctx.page.evaluate(`(async () => {
+      const { WebgpuSession } = await import('/addons/addon-webgpu/lib/addon-webgpu.mjs');
+      window.session = await WebgpuSession.create();
+      window.addon = window.session.createAddon();
+      window.addonB = window.session.createAddon();
+      window.term.loadAddon(window.addon);
+      window.termB = new window.Terminal({ cols: 20, rows: 4, allowProposedApi: true });
+      const container = document.createElement('div');
+      container.id = 'terminal-container-b';
+      document.body.appendChild(container);
+      window.termB.open(container);
+      window.termB.loadAddon(window.addonB);
+    })()`);
+    await assertWebgpuRenderer(ctx);
+    expect(await ctx.page.evaluate('window.termB._core._renderService._renderer.value === window.addonB._renderer')).toBe(true);
+    await ctx.page.evaluate(`
+      window.canvasA = window.addon._renderer._canvas;
+      window.canvasB = window.addonB._renderer._canvas;
+      window.session.dispose();
+      window.session.dispose();
+    `);
+    expect(await ctx.page.evaluate(`(async () => {
+      const loss = await window.addon._device.lost;
+      return {
+        rendererA: window.term._core._renderService._renderer.value.constructor.name,
+        rendererB: window.termB._core._renderService._renderer.value.constructor.name,
+        connectedA: window.canvasA.isConnected,
+        connectedB: window.canvasB.isConnected,
+        addonsDisposed: window.addon._store.isDisposed && window.addonB._store.isDisposed,
+        retainedAddons: window.session._addons.size,
+        reason: loss.reason
+      };
+    })()`)).toEqual({
+      rendererA: 'DomRenderer',
+      rendererB: 'DomRenderer',
+      connectedA: false,
+      connectedB: false,
+      addonsDisposed: true,
+      retainedAddons: 0,
+      reason: 'destroyed'
+    });
+    await ctx.proxy.write('DOM after session disposal');
+    await expect(ctx.page.locator('#terminal-container .xterm-rows')).toContainText('DOM after session disposal');
+  });
+
+  test('session disposal cancels a deferred addon before its terminal opens', async () => {
+    await ctx.page.evaluate('window.term = new window.Terminal({ allowProposedApi: true })');
+    await ctx.page.evaluate(`(async () => {
+      const { WebgpuSession } = await import('/addons/addon-webgpu/lib/addon-webgpu.mjs');
+      window.session = await WebgpuSession.create();
+      window.addon = window.session.createAddon();
+      window.term.loadAddon(window.addon);
+      window.session.dispose();
+      window.session.dispose();
+    })()`);
+    expect(await ctx.page.evaluate(`(() => ({
+      addonDisposed: window.addon._store.isDisposed,
+      deferredCancelled: window.addon._openListener.value === undefined,
+      retainedAddons: window.session._addons.size
+    }))()`)).toEqual({ addonDisposed: true, deferredCancelled: true, retainedAddons: 0 });
+    await ctx.page.evaluate(`window.term.open(document.querySelector('#terminal-container'))`);
+    await ctx.page.evaluate(`new Promise(resolve => window.term.write('deferred session disposal', resolve))`);
+    expect(await ctx.page.evaluate('window.term._core._renderService._renderer.value.constructor.name')).toBe('DomRenderer');
+    await expect(ctx.page.locator('.xterm-rows')).toContainText('deferred session disposal');
+    await expect(ctx.page.locator('.xterm-screen canvas')).toHaveCount(0);
+  });
+
+  test('createAddon rejects after session disposal', async () => {
+    await openTerminal(ctx);
+    expect(await ctx.page.evaluate(`(async () => {
+      const { WebgpuSession } = await import('/addons/addon-webgpu/lib/addon-webgpu.mjs');
+      window.session = await WebgpuSession.create();
+      window.addon = window.session.createAddon();
+      window.session.dispose();
+      let error = 'no throw';
+      try {
+        window.session.createAddon();
+      } catch (e) {
+        error = e.message;
+      }
+      return { error, addonDisposed: window.addon._store.isDisposed, retainedAddons: window.session._addons.size };
+    })()`)).toEqual({ error: 'Cannot create a WebGPU addon from a disposed or lost session', addonDisposed: true, retainedAddons: 0 });
+  });
+
+  test('createAddon rejects after the session device is lost', async () => {
+    await openTerminal(ctx);
+    expectedLosses = 1;
+    expect(await ctx.page.evaluate(`(async () => {
+      const { WebgpuSession } = await import('/addons/addon-webgpu/lib/addon-webgpu.mjs');
+      window.gpuEvents ??= { errors: [], uncapturedErrors: [], losses: 0 };
+      window.session = await WebgpuSession.create();
+      window.addon = window.session.createAddon();
+      window.addon.onContextLoss(() => window.gpuEvents.losses++);
+      window.session._device.destroy();
+      await window.session._device.lost;
+      let error = 'no throw';
+      try {
+        window.session.createAddon();
+      } catch (e) {
+        error = e.message;
+      }
+      return { error, contextLost: window.session._context.lost };
+    })()`)).toEqual({ error: 'Cannot create a WebGPU addon from a disposed or lost session', contextLost: true });
+  });
+
   test('disposal is idempotent, restores the DOM renderer and destroys the device', async () => {
     await openTerminal(ctx);
     await loadWebgpuAddon(ctx);

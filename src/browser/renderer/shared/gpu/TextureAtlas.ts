@@ -152,13 +152,23 @@ export class TextureAtlas implements ITextureAtlas {
     if (!page) {
       return [];
     }
-    const rects: IDirtyRect[] = [];
-    for (const rect of page.dirtyRects) {
-      if (rect.version > lastVersion) {
-        rects.push({ x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+    // Records are appended in monotonically increasing version order, so a binary
+    // search finds the first rect newer than lastVersion and the suffix is the
+    // result. The stored records (which carry their version tag) are returned by
+    // reference instead of being cloned per rect, keeping incremental uploads
+    // allocation-free.
+    const rects = page.dirtyRects;
+    let low = 0;
+    let high = rects.length;
+    while (low < high) {
+      const mid = (low + high) >> 1;
+      if (rects[mid].version > lastVersion) {
+        high = mid;
+      } else {
+        low = mid + 1;
       }
     }
-    return rects;
+    return rects.slice(low);
   }
 
   public clearTexture(): void {
