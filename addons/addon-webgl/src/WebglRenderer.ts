@@ -83,6 +83,6 @@ class WebglBackend extends Disposable implements IGpuBackend {
     }
   }
 
-  public beginRender(): void {}
+  public beginRender(_dimensions: IRenderDimensions): void {}
   public endRender(): void {}
 }

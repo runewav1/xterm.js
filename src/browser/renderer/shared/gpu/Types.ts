@@ -33,7 +33,7 @@ export interface IGpuBackend extends IDisposable {
   readonly onContextLoss: IEvent<void>;
   readonly onContextRestored?: IEvent<void>;
   createRenderers(terminal: Terminal, dimensions: IRenderDimensions, optionsService: IOptionsService, themeService: IThemeService, logService: ILogService): { glyphRenderer: IGlyphRenderer, rectangleRenderer: IRectangleRenderer };
-  beginRender(): void;
+  beginRender(dimensions: IRenderDimensions): void;
   endRender(): void;
 }
 

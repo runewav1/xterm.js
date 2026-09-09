@@ -382,7 +382,7 @@ export class GpuRenderer extends Disposable implements IRenderer {
 
     // Render
     try {
-      this._backend.beginRender();
+      this._backend.beginRender(this.dimensions);
       this._rectangleRenderer.value.renderBackgrounds();
       this._glyphRenderer.value.render(this._model);
       if (!this._cursorBlinkStateManager.value || this._cursorBlinkStateManager.value.isCursorVisible) {

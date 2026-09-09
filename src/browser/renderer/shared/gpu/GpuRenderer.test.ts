@@ -11,8 +11,8 @@ import { Emitter } from '../../../../common/Event';
 import { DisposableStore } from '../../../../common/Lifecycle';
 import { css } from '../../../../common/Color';
 import type { ICoreBrowserService } from '../../../services/Services';
-import type { IRenderModel } from './Types';
-import type { IGpuBackend, IGlyphRenderer, IRectangleRenderer } from './Types';
+import type { IRenderDimensions } from '../Types';
+import type { IGpuBackend, IGlyphRenderer, IRectangleRenderer, IRenderModel } from './Types';
 import { GpuRenderer } from './GpuRenderer';
 
 class FakeGlyphRenderer implements IGlyphRenderer {
@@ -49,7 +49,7 @@ class FakeBackend implements IGpuBackend {
   public createRenderers(): { glyphRenderer: IGlyphRenderer, rectangleRenderer: IRectangleRenderer } {
     return { glyphRenderer: this._glyphRenderer, rectangleRenderer: this._rectangleRenderer };
   }
-  public beginRender(): void {}
+  public beginRender(_dimensions: IRenderDimensions): void {}
   public endRender(): void {}
   public dispose(): void {}
 }
@@ -118,9 +118,10 @@ describe('GpuRenderer', () => {
     terminal = new Terminal({ cols: 2, rows: 2 });
     const core = (terminal as any)._core;
     core.screenElement = { appendChild: () => {}, isConnected: false, style: {} };
+    const noopDisposable = () => ({ dispose: () => {} });
     core._linkifier.value = {
-      onShowLinkUnderline: () => ({ dispose: () => {} }),
-      onHideLinkUnderline: () => ({ dispose: () => {} })
+      onShowLinkUnderline: noopDisposable,
+      onHideLinkUnderline: noopDisposable
     };
     const coreBrowser = createCoreBrowserService();
     coreBrowserService = coreBrowser.service;
