@@ -22,7 +22,15 @@ export function createGlyphShader(maxAtlasPages: number): string {
     cases += `case ${i}u: { return textureSampleLevel(page${i}, atlasSampler, input.uv, 0.0); }\n`;
   }
   return `${quadSource}
-@group(0) @binding(0) var<uniform> resolution: vec2f;
+// viewport.xy is the rasterization viewport size (the intended grid clamped to
+// the attachment, which WebGPU requires the viewport to stay within), and
+// viewport.zw is intendedGrid / viewport. offset is in device pixels so it is
+// normalized by the viewport size; cell and size are grid units normalized by
+// the intended grid, so they are scaled together by viewport.zw. This keeps
+// every glyph at its exact intended device pixel position (offset + x*cellW +
+// unit*glyphSize) for any backing size, clipping only the final edge when the
+// attachment is smaller than the grid.
+@group(0) @binding(0) var<uniform> viewport: vec4f;
 @group(0) @binding(1) var atlasSampler: sampler;
 ${textures}
 struct GlyphOutput {
@@ -42,7 +50,7 @@ struct GlyphOutput {
 ) -> GlyphOutput {
   let unit = quad(vertex);
   var output: GlyphOutput;
-  output.position = clip(offset / resolution + cell + unit * size);
+  output.position = clip(offset / viewport.xy + (cell + unit * size) * viewport.zw);
   output.uv = uv + unit * uvSize;
   output.page = u32(page);
   return output;
@@ -58,6 +66,10 @@ struct GlyphOutput {
 }
 
 export const rectangleShader = `${quadSource}
+// position and size are grid units normalized by the intended grid, so the
+// whole quad is scaled by viewport.zw to land at exact device pixels, matching
+// the glyph shader's transform for the same viewport.
+@group(0) @binding(0) var<uniform> viewport: vec4f;
 struct RectangleOutput {
   @builtin(position) position: vec4f,
   @location(0) color: vec4f,
@@ -70,7 +82,7 @@ struct RectangleOutput {
   @location(2) color: vec4f
 ) -> RectangleOutput {
   var output: RectangleOutput;
-  output.position = clip(position + quad(vertex) * size);
+  output.position = clip((position + quad(vertex) * size) * viewport.zw);
   output.color = vec4f(color.rgb * color.a, color.a);
   return output;
 }

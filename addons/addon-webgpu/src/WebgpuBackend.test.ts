@@ -57,6 +57,7 @@ function createFakeGpu() {
   const copies: ICopyRecord[] = [];
   const textureWrites: { texture: GPUTexture, origin: number[], size: number[], data: Uint8Array, bytesPerRow: number, rowsPerImage: number }[] = [];
   const draws: IDrawRecord[] = [];
+  const viewports: number[] = [];
   const pipelines: GPURenderPipelineDescriptor[] = [];
   const bindGroups: GPUBindGroupDescriptor[] = [];
   const events: string[] = [];
@@ -125,6 +126,9 @@ function createFakeGpu() {
       const pass = {
         setPipeline: (value: GPURenderPipeline) => pipeline = value,
         setBindGroup: () => {},
+        setViewport: (x: number, y: number, width: number, height: number, _minDepth: number, _maxDepth: number) => {
+          viewports.push(x, y, width, height);
+        },
         setVertexBuffer: (_slot: number, value: GPUBuffer, offset: number, size: number) => {
           assert.strictEqual(offset, 0);
           assert.isAtMost(size, value.size);
@@ -145,7 +149,7 @@ function createFakeGpu() {
           events.push('begin');
           return pass;
         },
-        finish: () => ({ frameDraws })
+        finish: () => ({ frameDraws, viewports })
       } as unknown as GPUCommandEncoder;
     },
     queue: {
@@ -189,7 +193,7 @@ function createFakeGpu() {
       }
     } as unknown as GPUQueue
   } satisfies Pick<GPUDevice, 'limits' | 'lost' | 'destroy' | 'addEventListener' | 'removeEventListener' | 'createBuffer' | 'createTexture' | 'createSampler' | 'createShaderModule' | 'createRenderPipeline' | 'createBindGroup' | 'createCommandEncoder' | 'queue'>;
-  return { device: device as unknown as GPUDevice, canvas, state, limits, buffers, textures, writes, copies, textureWrites, draws, pipelines, bindGroups, events, lose };
+  return { device: device as unknown as GPUDevice, canvas, state, limits, buffers, textures, writes, copies, textureWrites, draws, viewports, pipelines, bindGroups, events, lose };
 }
 
 interface ITestAtlasPage {
@@ -296,7 +300,7 @@ describe('WebgpuBackend', () => {
   afterEach(() => store.dispose());
 
   function frame(): void {
-    backend.beginRender();
+    backend.beginRender(dimensions);
     rectangleRenderer.renderBackgrounds();
     glyphRenderer.render(model);
     rectangleRenderer.renderCursor();
@@ -326,11 +330,83 @@ describe('WebgpuBackend', () => {
       });
     }
     frame();
-    assert.strictEqual(Array.from(gpu.bindGroups[0].entries).length, 18);
+    assert.strictEqual(Array.from(gpu.bindGroups[0].entries).length, 1);
+    assert.strictEqual(Array.from(gpu.bindGroups[1].entries).length, 18);
     for (const copy of gpu.copies) {
       assert.strictEqual(copy.source.flipY, false);
       assert.strictEqual(copy.destination.premultipliedAlpha, true);
       assert.strictEqual(copy.destination.colorSpace, 'srgb');
+    }
+  });
+
+  function resolutionUniform(): Float32Array {
+    return gpu.writes.find(e => e.buffer.label === 'xterm resolution')!.data;
+  }
+
+  it('renders into the exact intended viewport when the backing store fits the grid', () => {
+    frame();
+    assert.deepStrictEqual(gpu.viewports, [0, 0, 40, 80]);
+    assert.deepStrictEqual(Array.from(resolutionUniform()), [40, 80, 1, 1]);
+  });
+
+  it('keeps the intended viewport when the backing store is larger than the grid', () => {
+    gpu.canvas.width = 41;
+    gpu.canvas.height = 81;
+    frame();
+    assert.deepStrictEqual(gpu.viewports, [0, 0, 40, 80]);
+    assert.deepStrictEqual(Array.from(resolutionUniform()), [40, 80, 1, 1]);
+  });
+
+  it('falls back to the backing store with a compensated scale when it is smaller than the grid', () => {
+    gpu.canvas.width = 39;
+    gpu.canvas.height = 79;
+    update(3, 0);
+    frame();
+    assert.deepStrictEqual(gpu.viewports, [0, 0, 39, 79]);
+    const uniform = Array.from(resolutionUniform());
+    assert.strictEqual(uniform[0], 39);
+    assert.strictEqual(uniform[1], 79);
+    assert.closeTo(uniform[2], 40 / 39, 1e-6);
+    assert.closeTo(uniform[3], 80 / 79, 1e-6);
+    // Geometry stays grid-normalized; viewport.zw compensates in the shader.
+    const glyph = gpu.draws.find(e => e.buffer.label === 'xterm glyphs')!;
+    assert.strictEqual(glyph.submitted![42], 3 / 4);
+    assert.strictEqual(glyph.submitted![35], 10 / 40);
+  });
+
+  it('does not re-upload the viewport uniform when the backing or grid is unchanged', () => {
+    gpu.canvas.width = 39;
+    gpu.canvas.height = 79;
+    frame();
+    const count = gpu.writes.filter(e => e.buffer.label === 'xterm resolution').length;
+    frame();
+    assert.strictEqual(gpu.writes.filter(e => e.buffer.label === 'xterm resolution').length, count, 'unchanged frames must not re-upload the uniform');
+    gpu.canvas.width = 40;
+    frame();
+    assert.strictEqual(gpu.writes.filter(e => e.buffer.label === 'xterm resolution').length, count + 1, 'a changed backing must upload exactly once');
+  });
+
+  it('keeps the viewport within the attachment and the grid stretch-free across font/DPI dimensions', () => {
+    for (const [gridWidth, gridHeight, backingWidth, backingHeight] of [
+      [567, 324, 568, 325],
+      [567, 324, 566, 323],
+      [560, 340, 560, 340],
+      [1024, 640, 1023, 641]
+    ] as const) {
+      dimensions.device.canvas.width = gridWidth;
+      dimensions.device.canvas.height = gridHeight;
+      gpu.canvas.width = backingWidth;
+      gpu.canvas.height = backingHeight;
+      gpu.writes.length = 0;
+      gpu.viewports.length = 0;
+      backend.beginRender(dimensions);
+      backend.endRender();
+      const [vpW, vpH, scaleX, scaleY] = Array.from(resolutionUniform());
+      assert.isAtMost(vpW, backingWidth, 'viewport must stay within the attachment');
+      assert.isAtMost(vpH, backingHeight, 'viewport must stay within the attachment');
+      assert.closeTo(vpW * scaleX, gridWidth, 1e-3, 'viewport * scale must reproduce the grid without stretching');
+      assert.closeTo(vpH * scaleY, gridHeight, 1e-3, 'viewport * scale must reproduce the grid without stretching');
+      assert.deepStrictEqual(gpu.viewports, [0, 0, vpW, vpH]);
     }
   });
 
@@ -348,13 +424,13 @@ describe('WebgpuBackend', () => {
     const { glyphRenderer: glyphB } = second.createRenderers(terminal, dimensions, new MockOptionsService(), theme, new MockLogService());
     glyphB.setAtlas(atlas);
     glyphB.beginFrame();
-    backend.beginRender();
+    backend.beginRender(dimensions);
     glyphRenderer.render(model);
     backend.endRender();
     const copiesAfterFirst = gpu.copies.length;
     const texturesAfterFirst = gpu.textures.length;
     const bindGroupsAfterFirst = gpu.bindGroups.length;
-    second.beginRender();
+    second.beginRender(dimensions);
     glyphB.render(model);
     second.endRender();
     assert.strictEqual(gpu.copies.length, copiesAfterFirst);
@@ -372,7 +448,7 @@ describe('WebgpuBackend', () => {
     const { glyphRenderer: glyphB } = second.createRenderers(terminal, dimensions, new MockOptionsService(), theme, new MockLogService());
     glyphB.setAtlas(atlas);
     glyphB.beginFrame();
-    second.beginRender();
+    second.beginRender(dimensions);
     glyphB.render(model);
     second.endRender();
     assert.strictEqual(gpu.copies.length, copies);
@@ -393,7 +469,7 @@ describe('WebgpuBackend', () => {
     assert.strictEqual(pages[0].destroyed, 0);
     assert.strictEqual(pages[1].destroyed, 0);
     gpu.copies.length = 0;
-    second.beginRender();
+    second.beginRender(dimensions);
     glyphB.render(model);
     second.endRender();
     assert.strictEqual(gpu.copies.length, 0);
@@ -405,7 +481,7 @@ describe('WebgpuBackend', () => {
     glyphC.setAtlas(atlas);
     glyphC.beginFrame();
     gpu.copies.length = 0;
-    third.beginRender();
+    third.beginRender(dimensions);
     glyphC.render(model);
     third.endRender();
     assert.strictEqual(gpu.copies.length, 2);
@@ -443,7 +519,7 @@ describe('WebgpuBackend', () => {
     const otherAtlas = store.add(new TestAtlas());
     glyphB.setAtlas(otherAtlas);
     glyphB.beginFrame();
-    second.beginRender();
+    second.beginRender(dimensions);
     glyphB.render(model);
     second.endRender();
     gpu.copies.length = 0;
@@ -451,7 +527,7 @@ describe('WebgpuBackend', () => {
     frame();
     assert.strictEqual(gpu.copies.length, 2);
     assert.deepStrictEqual(gpu.copies.map(e => e.source.source), [atlas.pages[0].canvas, atlas.pages[1].canvas]);
-    second.beginRender();
+    second.beginRender(dimensions);
     glyphB.render(model);
     second.endRender();
     assert.strictEqual(gpu.copies.length, 2);
@@ -769,7 +845,7 @@ describe('WebgpuBackend', () => {
     page.canvas = fakeCanvas(256, 256);
     glyphH.setAtlas(atlas);
     glyphH.beginFrame();
-    hybridBackend.beginRender();
+    hybridBackend.beginRender(dimensions);
     glyphH.render(model);
     hybridBackend.endRender();
     gpu.copies.length = 0;
@@ -780,7 +856,7 @@ describe('WebgpuBackend', () => {
     page.dirtyRects = [{ x: 0, y: 0, width: 10, height: 20, version: base + 1 }];
     page.version = base + 1;
     glyphH.beginFrame();
-    hybridBackend.beginRender();
+    hybridBackend.beginRender(dimensions);
     glyphH.render(model);
     hybridBackend.endRender();
     assert.strictEqual(gpu.copies.length, 1, 'small burst should use a full-page copy');
@@ -794,7 +870,7 @@ describe('WebgpuBackend', () => {
     page.dirtyRects = Array.from({ length: 40 }, (_, i) => ({ x: i * 20, y: 0, width: 10, height: 20, version: base2 + 1 + i }));
     page.version = base2 + 40;
     glyphH.beginFrame();
-    hybridBackend.beginRender();
+    hybridBackend.beginRender(dimensions);
     glyphH.render(model);
     hybridBackend.endRender();
     assert.isAbove(gpu.copies.length, 1, 'large burst should use multiple subrect copies');
@@ -814,7 +890,7 @@ describe('WebgpuBackend', () => {
     const { glyphRenderer: glyphB } = secondBackend.createRenderers(terminal, dimensions, new MockOptionsService(), theme, new MockLogService());
     glyphB.setAtlas(atlas);
     glyphB.beginFrame();
-    secondBackend.beginRender();
+    secondBackend.beginRender(dimensions);
     glyphB.render(model);
     secondBackend.endRender();
     gpu.copies.length = 0;
@@ -822,12 +898,12 @@ describe('WebgpuBackend', () => {
     const base = page.version;
     page.dirtyRects = [{ x: 3, y: 4, width: 10, height: 20, version: base + 1 }];
     page.version = base + 1;
-    backend.beginRender();
+    backend.beginRender(dimensions);
     glyphRenderer.render(model);
     backend.endRender();
     assert.strictEqual(gpu.copies.length, 1);
     assert.strictEqual(gpu.textureWrites.length, 0);
-    secondBackend.beginRender();
+    secondBackend.beginRender(dimensions);
     glyphB.render(model);
     secondBackend.endRender();
     assert.strictEqual(gpu.copies.length, 2);
@@ -909,24 +985,24 @@ describe('WebgpuBackend', () => {
 
   it('rejects oversized buffers and textures before allocating them', () => {
     gpu.limits.maxBufferSize = 512;
-    backend.beginRender();
+    backend.beginRender(dimensions);
     assert.throws(() => glyphRenderer.render(model), RangeError, 'buffer size limit');
     backend.endRender();
     assert.strictEqual(gpu.buffers.filter(e => e.buffer.label === 'xterm glyphs').length, 0);
     gpu.limits.maxBufferSize = 1 << 20;
     atlas.pages[0].canvas.width = backend.maxTextureSize + 1;
-    backend.beginRender();
+    backend.beginRender(dimensions);
     assert.throws(() => glyphRenderer.render(model), RangeError, 'texture size limit');
     backend.endRender();
     assert.strictEqual(gpu.textures.length, 1);
     gpu.canvas.width = backend.maxTextureSize + 1;
-    assert.throws(() => backend.beginRender(), RangeError, 'texture size limit');
+    assert.throws(() => backend.beginRender(dimensions), RangeError, 'texture size limit');
   });
 
   it('abandons active frames on device loss and dispatches context loss once', async () => {
     let losses = 0;
     store.add(backend.onContextLoss(() => losses++));
-    backend.beginRender();
+    backend.beginRender(dimensions);
     gpu.lose({ reason: 'unknown', message: 'test loss' });
     await gpu.device.lost;
     backend.endRender();
@@ -940,7 +1016,7 @@ describe('WebgpuBackend', () => {
     frame();
     let losses = 0;
     store.add(backend.onContextLoss(() => losses++));
-    backend.beginRender();
+    backend.beginRender(dimensions);
     backend.dispose();
     backend.dispose();
     context.dispose();
@@ -985,10 +1061,11 @@ describe('WebgpuBackend', () => {
   it('generates top-left geometry, explicit-LOD page switches and premultiplied rectangles', () => {
     const shader = createGlyphShader(4);
     assert.include(shader, '1.0 - 2.0 * position.y');
-    assert.include(shader, 'offset / resolution + cell + unit * size');
+    assert.include(shader, 'offset / viewport.xy + (cell + unit * size) * viewport.zw');
     assert.include(shader, '@binding(5) var page3');
     assert.notInclude(shader, 'var page4');
     assert.include(shader, 'case 3u: { return textureSampleLevel(page3, atlasSampler, input.uv, 0.0); }');
+    assert.include(rectangleShader, 'clip((position + quad(vertex) * size) * viewport.zw)');
     assert.include(rectangleShader, 'vec4f(color.rgb * color.a, color.a)');
   });
 });

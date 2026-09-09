@@ -65,7 +65,9 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
   public readonly onContextLoss = this._onContextLoss.event;
   private readonly _canvasContext: GPUCanvasContext;
   private readonly _resolutionBuffer: GPUBuffer;
-  private readonly _resolution = new Float32Array(2);
+  // viewport.xy = rasterization viewport size, viewport.zw = grid / viewport.
+  private readonly _viewport = new Float32Array(4);
+  private readonly _rectangleBindGroup: GPUBindGroup;
   private readonly _glyphBuffer: VertexBuffer;
   private readonly _backgroundBuffer: VertexBuffer;
   private readonly _cursorBuffer: VertexBuffer;
@@ -100,7 +102,12 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
       this._glyphBuffer = this._register(new VertexBuffer(device, 'xterm glyphs'));
       this._backgroundBuffer = this._register(new VertexBuffer(device, 'xterm backgrounds'));
       this._cursorBuffer = this._register(new VertexBuffer(device, 'xterm cursor'));
-      this._resolutionBuffer = device.createBuffer({ label: 'xterm resolution', size: 8, usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST });
+      this._resolutionBuffer = device.createBuffer({ label: 'xterm resolution', size: 16, usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST });
+      this._rectangleBindGroup = device.createBindGroup({
+        label: 'xterm rectangle viewport',
+        layout: this._context.rectanglePipeline.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: { buffer: this._resolutionBuffer } }]
+      });
       this._register(toDisposable(() => this._resolutionBuffer.destroy()));
       this._register(toDisposable(() => {
         if (this._atlas) {
@@ -125,7 +132,7 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
     return { glyphRenderer, rectangleRenderer };
   }
 
-  public beginRender(): void {
+  public beginRender(dimensions: IRenderDimensions): void {
     if (this._store.isDisposed || this._context.lost || this._pass) {
       return;
     }
@@ -135,12 +142,39 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
     if (this._canvas.width > this.maxTextureSize || this._canvas.height > this.maxTextureSize) {
       throw new RangeError('Canvas exceeds the WebGPU texture size limit');
     }
+    // WebGPU (unlike WebGL) requires the viewport to lie within the render
+    // attachment, so rasterization is clamped to the actual backing store. The
+    // intended grid (dimensions.device.canvas) is used verbatim when it fits;
+    // when the attachment is smaller the viewport falls back to the backing
+    // size and viewport.zw carries grid/viewport. The shaders scale the
+    // grid-normalized geometry (cell + quad size) by viewport.zw while keeping
+    // device-pixel offsets divided by the viewport size, so glyphs and
+    // rectangles land at their exact intended device pixel positions for any
+    // backing size; only the final edge is clipped when the attachment is
+    // smaller than the grid. Every GPU layer shares this transform.
+    const viewportWidth = Math.min(dimensions.device.canvas.width, this._canvas.width);
+    const viewportHeight = Math.min(dimensions.device.canvas.height, this._canvas.height);
+    if (viewportWidth <= 0 || viewportHeight <= 0) {
+      return;
+    }
+    // fround matches the float32 storage so unchanged frames skip the upload.
+    const scaleX = Math.fround(dimensions.device.canvas.width / viewportWidth);
+    const scaleY = Math.fround(dimensions.device.canvas.height / viewportHeight);
+    if (this._viewport[0] !== viewportWidth || this._viewport[1] !== viewportHeight ||
+        this._viewport[2] !== scaleX || this._viewport[3] !== scaleY) {
+      this._viewport[0] = viewportWidth;
+      this._viewport[1] = viewportHeight;
+      this._viewport[2] = scaleX;
+      this._viewport[3] = scaleY;
+      this._context.device.queue.writeBuffer(this._resolutionBuffer, 0, this._viewport);
+    }
     const view = this._canvasContext.getCurrentTexture().createView();
     const encoder = this._context.device.createCommandEncoder({ label: 'xterm frame' });
     this._pass = encoder.beginRenderPass({
       label: 'xterm viewport',
       colorAttachments: [{ view, loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }]
     });
+    this._pass.setViewport(0, 0, viewportWidth, viewportHeight, 0, 1);
     this._encoder = encoder;
   }
 
@@ -205,11 +239,6 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
     if (atlas.pages.length > this._context.maxAtlasPages && !this._pageOverflowWarned) {
       this._pageOverflowWarned = true;
       this._logService?.warn(`Atlas page count (${atlas.pages.length}) exceeds the WebGPU texture capacity (${this._context.maxAtlasPages}); excess pages will not render`);
-    }
-    if (this._resolution[0] !== width || this._resolution[1] !== height) {
-      this._resolution[0] = width;
-      this._resolution[1] = height;
-      this._context.device.queue.writeBuffer(this._resolutionBuffer, 0, this._resolution);
     }
     const buffer = this._glyphBuffer.buffer!;
     for (let y = 0; y < dirtyRows.length;) {
@@ -281,6 +310,7 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
       }
     }
     pass.setPipeline(this._context.rectanglePipeline);
+    pass.setBindGroup(0, this._rectangleBindGroup);
     pass.setVertexBuffer(0, buffer, 0, byteLength);
     pass.draw(4, vertices.count);
   }
