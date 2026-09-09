@@ -60,6 +60,7 @@ function createFakeGpu() {
   const viewports: number[] = [];
   const pipelines: GPURenderPipelineDescriptor[] = [];
   const bindGroups: GPUBindGroupDescriptor[] = [];
+  const samplers: GPUSamplerDescriptor[] = [];
   const events: string[] = [];
   const state = { unconfigured: 0, deviceDestroyed: 0, acquired: 0, configureError: false, pipelineError: false, hasContext: true, configuration: undefined as GPUCanvasConfiguration | undefined };
   const limits = { maxTextureDimension2D: 8192, maxSampledTexturesPerShaderStage: 32, maxBindingsPerBindGroup: 1000, maxBufferSize: 1 << 20 };
@@ -105,7 +106,10 @@ function createFakeGpu() {
       textures.push(record);
       return record.texture;
     },
-    createSampler: () => ({}) as GPUSampler,
+    createSampler: (descriptor: GPUSamplerDescriptor = {}) => {
+      samplers.push(descriptor);
+      return {} as GPUSampler;
+    },
     createShaderModule: (descriptor: GPUShaderModuleDescriptor) => ({ label: descriptor.label }) as GPUShaderModule,
     createRenderPipeline: (descriptor: GPURenderPipelineDescriptor) => {
       if (state.pipelineError) {
@@ -193,7 +197,7 @@ function createFakeGpu() {
       }
     } as unknown as GPUQueue
   } satisfies Pick<GPUDevice, 'limits' | 'lost' | 'destroy' | 'addEventListener' | 'removeEventListener' | 'createBuffer' | 'createTexture' | 'createSampler' | 'createShaderModule' | 'createRenderPipeline' | 'createBindGroup' | 'createCommandEncoder' | 'queue'>;
-  return { device: device as unknown as GPUDevice, canvas, state, limits, buffers, textures, writes, copies, textureWrites, draws, viewports, pipelines, bindGroups, events, lose };
+  return { device: device as unknown as GPUDevice, canvas, state, limits, buffers, textures, writes, copies, textureWrites, draws, viewports, pipelines, bindGroups, samplers, events, lose };
 }
 
 interface ITestAtlasPage {
@@ -322,6 +326,12 @@ describe('WebgpuBackend', () => {
     assert.strictEqual(gpu.state.configuration?.alphaMode, 'premultiplied');
     assert.strictEqual(backend.maxAtlasPages, 16);
     assert.strictEqual(backend.maxTextureSize, 8192);
+    assert.deepInclude(gpu.samplers[0], {
+      minFilter: 'nearest',
+      magFilter: 'nearest',
+      addressModeU: 'clamp-to-edge',
+      addressModeV: 'clamp-to-edge'
+    });
     for (const pipeline of gpu.pipelines) {
       assert.strictEqual(pipeline.primitive?.topology, 'triangle-strip');
       assert.deepStrictEqual(Array.from(pipeline.fragment!.targets)[0]?.blend, {

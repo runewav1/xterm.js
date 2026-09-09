@@ -142,7 +142,11 @@ export class WebgpuContext extends Disposable {
       fragment: { module: rectShader, entryPoint: 'fs', targets: [{ format, blend }] },
       primitive: { topology: 'triangle-strip' }
     });
-    this.sampler = device.createSampler({ minFilter: 'linear', magFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge' });
+    // Glyph quads normally map one atlas texel to one device pixel. Nearest
+    // sampling makes that lookup deterministic and prevents fractional
+    // positioning or backing-store correction from blending texels belonging
+    // to adjacent tightly-packed glyphs.
+    this.sampler = device.createSampler({ minFilter: 'nearest', magFilter: 'nearest', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge' });
     const emptyTexture = device.createTexture({ label: 'xterm empty atlas page', size: [1, 1], format: 'rgba8unorm', usage: TextureUsage.TEXTURE_BINDING });
     this._register(toDisposable(() => emptyTexture.destroy()));
     this.emptyTextureView = emptyTexture.createView();

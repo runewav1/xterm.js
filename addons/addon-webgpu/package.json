@@ -1,6 +1,6 @@
 {
 	"name": "@partty/addon-webgpu",
-	"version": "0.1.4-rc5",
+	"version": "0.1.4-rc6",
 	"description": "Experimental WebGPU renderer for the ParTTY xterm.js fork",
 	"main": "lib/addon-webgpu.mjs",
 	"module": "lib/addon-webgpu.mjs",

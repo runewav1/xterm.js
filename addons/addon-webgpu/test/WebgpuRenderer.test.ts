@@ -42,11 +42,11 @@ test.describe('WebGPU Renderer Integration Tests', () => {
     await loadWebgpuAddon(ctx);
   });
 
-  async function writeBoxRow(page: Page): Promise<void> {
-    await page.evaluate(`(() => {
+  async function writeBoxRow(page: Page, row: number = 0): Promise<void> {
+    await page.evaluate(`(async () => {
       window.term.reset();
       window.term.options.theme = { background: '#000000', foreground: '#ffffff' };
-      window.term.writeln('━'.repeat(window.term.cols));
+      await new Promise(resolve => window.term.write('\\x1b[${row + 1};1H' + '━'.repeat(window.term.cols), resolve));
     })()`);
     await page.evaluate(`(async () => {
       await new Promise(resolve => {
@@ -210,12 +210,30 @@ test.describe('WebGPU Renderer Integration Tests', () => {
         window.gpuUncapturedErrors ??= [];
         window.gpuUncapturedErrors.push(event.error.message);
       })`);
-      // Sweep terminal widths that produce fractional-DPR canvas sizing
-      // mismatches for the default cell metrics.
-      for (const cols of [60, 80, 81, 100, 101]) {
-        await page.evaluate(`window.term.resize(${cols}, 5)`);
-        await writeBoxRow(page);
-        await assertBoxRowHasNoBackgroundGaps(page);
+      // Sweep fractional font sizes and terminal widths that can expose a
+      // devicePixelContentBoxSize implementation returning CSS pixels. Check
+      // both edges of the viewport so undersized attachments cannot silently
+      // clip later columns or rows.
+      for (const fontSize of [6, 6.25, 10.25, 10.5, 12.25, 16, 24, 32]) {
+        for (const cols of [60, 81, 101]) {
+          await page.evaluate(`window.term.options.fontSize = ${fontSize}; window.term.resize(${cols}, 5)`);
+          await page.evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+          const sizes = await page.evaluate<{ backing: number[], grid: number[], css: number[] }>(`(() => {
+            const renderer = window.term._core._renderService._renderer.value;
+            return {
+              backing: [renderer._canvas.width, renderer._canvas.height],
+              grid: [renderer.dimensions.device.canvas.width, renderer.dimensions.device.canvas.height],
+              css: [renderer.dimensions.css.canvas.width, renderer.dimensions.css.canvas.height]
+            };
+          })()`);
+          const backingDistance = Math.abs(sizes.backing[0] - sizes.grid[0]) + Math.abs(sizes.backing[1] - sizes.grid[1]);
+          const cssDistance = Math.abs(sizes.backing[0] - sizes.css[0]) + Math.abs(sizes.backing[1] - sizes.css[1]);
+          expect(backingDistance, `fontSize=${fontSize} cols=${cols} backing=${sizes.backing} grid=${sizes.grid} css=${sizes.css}`).toBeLessThanOrEqual(cssDistance);
+          for (const row of [0, 4]) {
+            await writeBoxRow(page, row);
+            await assertBoxRowHasNoBackgroundGaps(page, row);
+          }
+        }
       }
       const uncapturedErrors = await page.evaluate('window.gpuUncapturedErrors ?? []');
       expect(uncapturedErrors, 'No GPU validation errors may be raised').toEqual([]);
