@@ -750,6 +750,23 @@ export class GpuRenderer extends Disposable implements IRenderer {
   }
 
   private _setCanvasDevicePixelDimensions(width: number, height: number): void {
+    // Some Chromium embedders and deviceScaleFactor emulation expose
+    // devicePixelContentBoxSize but return CSS-pixel dimensions. Accepting that
+    // value shrinks the backing store by DPR; WebGPU must then clamp its
+    // viewport to the undersized attachment, visibly clipping or distorting
+    // cells. A genuine device-pixel report will be closest to the renderer's
+    // device grid (normally within one rounding pixel), whereas a broken report
+    // is closest to the CSS canvas dimensions.
+    const cssDistance =
+      Math.abs(width - this.dimensions.css.canvas.width) +
+      Math.abs(height - this.dimensions.css.canvas.height);
+    const deviceDistance =
+      Math.abs(width - this.dimensions.device.canvas.width) +
+      Math.abs(height - this.dimensions.device.canvas.height);
+    if (cssDistance < deviceDistance) {
+      width = this.dimensions.device.canvas.width;
+      height = this.dimensions.device.canvas.height;
+    }
     if (this._canvas.width === width && this._canvas.height === height) {
       return;
     }

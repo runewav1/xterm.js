@@ -276,4 +276,28 @@ describe('GpuRenderer', () => {
     assert.strictEqual(backend.beginRenderCalls, 1);
     assert.strictEqual(glyphRenderer.renderCalls, 1);
   });
+
+  it('rejects CSS-pixel ResizeObserver dimensions reported as device pixels', () => {
+    renderer.dimensions.css.canvas.width = 107;
+    renderer.dimensions.css.canvas.height = 32;
+    renderer.dimensions.device.canvas.width = 160;
+    renderer.dimensions.device.canvas.height = 48;
+    const canvas = (renderer as any)._canvas as HTMLCanvasElement;
+
+    (renderer as any)._setCanvasDevicePixelDimensions(107, 32);
+
+    assert.deepStrictEqual([canvas.width, canvas.height], [160, 48]);
+  });
+
+  it('accepts genuine device-pixel ResizeObserver rounding corrections', () => {
+    renderer.dimensions.css.canvas.width = 107;
+    renderer.dimensions.css.canvas.height = 32;
+    renderer.dimensions.device.canvas.width = 160;
+    renderer.dimensions.device.canvas.height = 48;
+    const canvas = (renderer as any)._canvas as HTMLCanvasElement;
+
+    (renderer as any)._setCanvasDevicePixelDimensions(159, 47);
+
+    assert.deepStrictEqual([canvas.width, canvas.height], [159, 47]);
+  });
 });
