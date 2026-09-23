@@ -39,7 +39,7 @@ minimumReleaseAgeExclude:
   - '@typescript-eslint/typescript-estree@8.70.0'
   - '@typescript-eslint/utils@8.70.0'
   - '@typescript-eslint/visitor-keys@8.70.0'
-  - eslint-plugin-oxlint@1.82.0
+  - eslint-plugin-oxlint@1.82.0 || 1.85.0
   - oxlint-plugin-eslint@1.82.0
   - oxlint@1.82.0
   - typescript-eslint@8.70.0

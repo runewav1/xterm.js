@@ -1,6 +1,6 @@
 {
 	"name": "@partty/addon-webgl",
-	"version": "0.20.1",
+	"version": "0.20.2",
 	"author": {
 		"name": "The xterm.js authors",
 		"url": "https://xtermjs.org/"
