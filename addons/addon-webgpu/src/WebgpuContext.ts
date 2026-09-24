@@ -9,7 +9,14 @@ import { Disposable, toDisposable } from 'common/Lifecycle';
 import { createGlyphShader, rectangleShader } from './WebgpuShaders';
 
 const enum Constants {
-  MAX_ATLAS_PAGES = 16
+  MAX_ATLAS_PAGES = 16,
+  /**
+   * Largest page (bytes, rgba8) for which a small dirty burst is still uploaded
+   * with a single full-page copy. Above this, the transferred bytes dominate the
+   * per-call overhead, so a tiny burst uses subrect copies instead of
+   * re-uploading the whole page (a 4096^2 page is 64MiB per upload).
+   */
+  FULL_PAGE_COPY_MAX_BYTES = 1 << 20
 }
 
 // The compiler's DOM lib has WebGPU interfaces but not the usage flag globals yet.
@@ -37,9 +44,11 @@ export interface IWebgpuContextOptions {
    * When true (default), large incremental glyph additions upload only the
    * dirty rectangles into the existing GPU page texture via
    * copyExternalImageToTexture subrect copies instead of copying the whole
-   * page. Small bursts (at or below `partialUploadThreshold` rects) still do a
-   * full-page copy because a single copy call transfers the same bytes with
-   * less per-call overhead. Full-page re-uploads always occur on layout changes.
+   * page. Small bursts (at or below `partialUploadThreshold` rects) on a small
+   * page still do a full-page copy, where one call transfers comparable bytes
+   * with less per-call overhead; on a large page they use subrect copies so a
+   * single glyph does not re-upload the whole page. Full-page re-uploads always
+   * occur on layout changes.
    */
   partialAtlasUpload?: boolean;
   /**
@@ -274,12 +283,16 @@ export class WebgpuContext extends Disposable {
       this._copyFullPage(current, page);
       return;
     }
-    // HYBRID gate: for small dirty bursts a single full-page copy is cheaper
-    // than many subrect copies, because every copyExternalImageToTexture call
-    // carries per-call overhead while the transferred bytes are identical.
-    // Only switch to the partial subrect path once a large burst makes the
-    // full-page copy more expensive than the sum of its parts.
-    if (this.partialUploadThreshold > 0 && rects.length <= this.partialUploadThreshold) {
+    // HYBRID gate: for small dirty bursts a single full-page copy can beat many
+    // subrect copies because every copyExternalImageToTexture call carries
+    // per-call overhead. That only holds while the page is small: the bytes are
+    // NOT identical once the page is large, so a tiny burst on a large page must
+    // use subrect copies rather than re-upload the whole page.
+    if (
+      this.partialUploadThreshold > 0 &&
+      rects.length <= this.partialUploadThreshold &&
+      current.width * current.height * 4 <= Constants.FULL_PAGE_COPY_MAX_BYTES
+    ) {
       this._copyFullPage(current, page);
       return;
     }

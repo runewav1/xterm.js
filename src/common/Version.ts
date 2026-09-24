@@ -6,4 +6,4 @@
 /**
  * The xterm.js version. This is updated by the publish script from package.json.
  */
-export const XTERM_VERSION = '6.0.0';
+export const XTERM_VERSION = '6.2.0-beta.1';

@@ -53,6 +53,8 @@ export class LinkRenderLayer extends BaseRenderLayer {
   }
 
   private _handleShowLinkUnderline(e: ILinkifierEvent): void {
+    // First link shown on this pane allocates the overlay canvas backing store.
+    this._activateCanvas();
     if (e.fg === INVERTED_DEFAULT_COLOR) {
       this._ctx.fillStyle = this._themeService.colors.background.css;
     } else if (e.fg !== undefined && is256Color(e.fg)) {

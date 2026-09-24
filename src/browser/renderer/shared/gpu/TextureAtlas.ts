@@ -40,7 +40,7 @@ const enum Constants {
   /**
    * The maximum texture size regardless of what the actual hardware maximum turns out to be. This
    * is enforced to ensure uploading the texture still finishes in a reasonable amount of time. A
-   * 4096 squared image takes up 16MB of GPU memory.
+   * 4096 squared rgba8 image takes up 64MB of GPU memory (8192 squared would be 256MB).
    */
   FORCED_MAX_TEXTURE_SIZE = 4096
 }
@@ -77,6 +77,12 @@ export class TextureAtlas implements ITextureAtlas {
   private _workAttributeData: AttributeData = new AttributeData();
 
   private _textureSize: number = 512;
+  /**
+   * Page dimension cap. The hardware maximum can be 8192+ (256 MiB per rgba8
+   * page), so it is bounded by the forced ceiling to keep page allocation and
+   * upload bounded. Applied to overflow pages and page merges alike.
+   */
+  private readonly _maxPageSize: number;
 
   private readonly _onAddTextureAtlasCanvas = new Emitter<HTMLCanvasElement>();
   public readonly onAddTextureAtlasCanvas = this._onAddTextureAtlasCanvas.event;
@@ -89,7 +95,8 @@ export class TextureAtlas implements ITextureAtlas {
     private readonly _unicodeService: IUnicodeService,
     private readonly _logService: ILogService
   ) {
-    this._textureSize = Math.min(this._textureSize, this._config.maxTextureSize);
+    this._maxPageSize = Math.min(this._config.maxTextureSize, Constants.FORCED_MAX_TEXTURE_SIZE);
+    this._textureSize = Math.min(this._textureSize, this._maxPageSize);
     this._createNewPage();
     this._tmpCanvas = createCanvas(
       _document,
@@ -188,7 +195,7 @@ export class TextureAtlas implements ITextureAtlas {
       // Find the set of the largest 4 images, below the maximum size, with the highest
       // percentages used
       const pagesBySize = this._pages.filter(e => {
-        return e.canvas.width * 2 <= this._config.maxTextureSize;
+        return e.canvas.width * 2 <= this._maxPageSize;
       }).sort((a, b) => {
         if (b.canvas.width !== a.canvas.width) {
           return b.canvas.width - a.canvas.width;
@@ -510,7 +517,7 @@ export class TextureAtlas implements ITextureAtlas {
     // Allow 1 cell width per character, with a minimum of 2 (CJK), plus some padding. This is used
     // to draw the glyph to the canvas as well as to restrict the bounding box search to ensure
     // giant ligatures (eg. =====>) don't impact overall performance.
-    const allowedWidth = Math.min(this._config.deviceCellWidth * Math.max(chars.length, 2) + TMP_CANVAS_GLYPH_PADDING * 2, this._config.maxTextureSize);
+    const allowedWidth = Math.min(this._config.deviceCellWidth * Math.max(chars.length, 2) + TMP_CANVAS_GLYPH_PADDING * 2, this._maxPageSize);
     if (this._tmpCanvas.width < allowedWidth) {
       this._tmpCanvas.width = allowedWidth;
     }
@@ -867,7 +874,7 @@ export class TextureAtlas implements ITextureAtlas {
           if (this._pages.length >= this._config.maxAtlasPages) {
             this._evictAllPages();
           }
-          this._overflowSizePage = new AtlasPage(this._document, this._config.maxTextureSize);
+          this._overflowSizePage = new AtlasPage(this._document, this._maxPageSize);
           this.pages.push(this._overflowSizePage);
 
           // Invalidate renderer models so all texture pages are refreshed.

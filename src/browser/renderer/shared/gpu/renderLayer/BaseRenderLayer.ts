@@ -15,6 +15,8 @@ export abstract class BaseRenderLayer extends Disposable implements IRenderLayer
   protected readonly _ctx: CanvasRenderingContext2D;
   private _deviceCellWidth: number = 0;
   private _deviceCellHeight: number = 0;
+  private _canvasSized: boolean = false;
+  private _pendingDim: IRenderDimensions | undefined;
 
   constructor(
     terminal: Terminal,
@@ -47,6 +49,31 @@ export abstract class BaseRenderLayer extends Disposable implements IRenderLayer
   public resize(terminal: Terminal, dim: IRenderDimensions): void {
     this._deviceCellWidth = dim.device.cell.width;
     this._deviceCellHeight = dim.device.cell.height;
+    this._pendingDim = dim;
+    // Defer the backing-store allocation until the layer first draws
+    // (see _activateCanvas). The canvas is absolutely positioned, so an
+    // unsized layer does not affect layout, and a pane that never shows a link
+    // never pays for a full-size overlay canvas.
+    if (this._canvasSized) {
+      this._applyCanvasSize(dim);
+    }
+  }
+
+  /**
+   * Allocate the canvas backing store on first use, then keep it: repeated
+   * link hovers must not re-allocate a large canvas every time.
+   */
+  protected _activateCanvas(): void {
+    if (this._canvasSized) {
+      return;
+    }
+    this._canvasSized = true;
+    if (this._pendingDim) {
+      this._applyCanvasSize(this._pendingDim);
+    }
+  }
+
+  private _applyCanvasSize(dim: IRenderDimensions): void {
     this._canvas.width = dim.device.canvas.width;
     this._canvas.height = dim.device.canvas.height;
     this._canvas.style.width = `${dim.css.canvas.width}px`;
