@@ -1506,6 +1506,54 @@ export function injectSharedRendererTestsStandalone(ctx: ISharedRendererTestCont
 }
 
 /**
+ * Pixel-level cursor smear tests. Injected only into the WebGL and WebGPU
+ * suites because the DOM renderer ignores the `cursorSmear` option.
+ */
+export function injectSharedCursorSmearTests(ctx: ISharedRendererTestContext): void {
+  test.describe('cursor smear', () => {
+    test.beforeEach(async () => {
+      await ctx.value.proxy.reset();
+      await ctx.value.page.evaluate(`
+        window.term.options.cursorBlink = false;
+        window.term.options.cursorStyle = 'block';
+        window.term.options.cursorInactiveStyle = 'block';
+        window.term.options.cursorSmear = { enabled: false };
+        window.term.options.theme = { background: '#000000', foreground: '#ffffff', cursor: '#ffffff' };
+      `);
+      await ctx.value.proxy.focus();
+      frameDetails = undefined;
+    });
+
+    test('renders a translucent trail and clears it when disabled', async () => {
+      await ctx.value.page.evaluate(`window.term.options.cursorSmear = {
+        enabled: true, style: 'fade', duration: 5000, opacity: 1, samples: 1, color: '#ff000080'
+      };`);
+      // Render the initial position first so the smear model observes it as a
+      // baseline before the cursor moves away.
+      await waitForRenderAfter(ctx.value, () => ctx.value.proxy.write('\x1b[1;1H'));
+      await ctx.value.proxy.write('\x1b[1;4H');
+      // 50% red over the black background at the previous cursor cell.
+      await pollForApproximate(ctx.value.page, 64, () => getCellColor(ctx.value, 1, 1), [128, 0, 0, 255], async () => { frameDetails = undefined; }, 1500);
+      await ctx.value.page.evaluate(`window.term.options.cursorSmear = { enabled: false };`);
+      await pollForApproximate(ctx.value.page, 4, () => getCellColor(ctx.value, 1, 1), [0, 0, 0, 255], async () => { frameDetails = undefined; }, 1500);
+    });
+
+    test('does not tint the live block cursor cell', async () => {
+      await ctx.value.page.evaluate(`window.term.options.cursorSmear = {
+        enabled: true, style: 'trail', duration: 5000, opacity: 1, samples: 16, easing: 'linear', color: '#ff0000'
+      };`);
+      await waitForRenderAfter(ctx.value, () => ctx.value.proxy.write('\x1b[1;1H'));
+      await ctx.value.proxy.write('\x1b[1;4H');
+      // After the travel phase the head sits on the destination cell while the
+      // trail is still fading; without clipping the live block cell would be
+      // tinted red instead of the pure theme color.
+      await ctx.value.page.waitForTimeout(4000);
+      await pollForApproximate(ctx.value.page, 4, () => getCellColor(ctx.value, 4, 1), [255, 255, 255, 255], async () => { frameDetails = undefined; }, 700);
+    });
+  });
+}
+
+/**
  * Gets the color of the pixel in the center of a cell.
  * @param ctx The test context.
  * @param col The 1-based column index to get the color for.

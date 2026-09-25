@@ -1,8 +1,8 @@
 {
 	"name": "@partty/xterm",
 	"description": "Full xterm terminal, in your browser",
-	"version": "6.2.0-beta.4",
-	"packageManager": "pnpm@12.6.0",
+	"version": "6.2.0-beta.5",
+	"packageManager": "pnpm@12.7.0",
 	"engines": {
 		"node": ">=26"
 	},

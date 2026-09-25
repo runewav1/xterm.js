@@ -4,7 +4,7 @@
  */
 
 import type { IDecoration, IDecorationOptions, ILinkHandler, ILogger, IWindowsPty, IOverviewRulerOptions } from '@xterm/xterm';
-import { CoreMouseEncoding, CoreMouseEventType, CursorInactiveStyle, CursorStyle, ICharset, IColor, ICoreMouseEvent, ICoreMouseProtocol, IDecPrivateModes, IDisposable, IKittyKeyboardState, IModes, IOscLinkData, IWindowOptions } from '../Types';
+import { CoreMouseEncoding, CoreMouseEventType, CursorInactiveStyle, CursorStyle, ICharset, IColor, ICoreMouseEvent, ICoreMouseProtocol, ICursorSmearOptions, IDecPrivateModes, IDisposable, IKittyKeyboardState, IModes, IOscLinkData, IWindowOptions } from '../Types';
 import { IAttributeData, IBuffer, IBufferSet } from '../buffer/Types';
 import { createDecorator, IServiceIdentifier } from './ServiceRegistry';
 import type { Emitter, IEvent } from '../Event';
@@ -211,6 +211,7 @@ export interface ITerminalOptions {
   cursorStyle?: CursorStyle;
   cursorWidth?: number;
   cursorInactiveStyle?: CursorInactiveStyle;
+  cursorSmear?: ICursorSmearOptions;
   disableStdin?: boolean;
   documentOverride?: any | null;
   drawBoldTextInBrightColors?: boolean;

@@ -920,6 +920,49 @@ describe('BufferLine', function(): void {
       assert.isAtMost((line as any)._styleFg.length, 32);
     });
 
+    it('indexes styles above the scan threshold and stays correct through compaction', () => {
+      const line = new TestBufferLine(64);
+      for (let x = 0; x < 40; x++) {
+        line.setCell(x, createCellData(x + 1, 'a', 1));
+      }
+      assert.isAbove((line as any)._styleFg.length, 16);
+      assert.isDefined((line as any)._styleIndex);
+      for (let x = 0; x < 40; x++) {
+        assert.equal(line.getFg(x), x + 1);
+      }
+      // Re-writing an existing style reuses its id instead of growing the table.
+      const before = (line as any)._styleFg.length;
+      line.setCell(0, createCellData(40, 'b', 1));
+      line.setCell(0, createCellData(1, 'b', 1));
+      assert.equal(line.getFg(0), 1);
+      assert.equal((line as any)._styleFg.length, before);
+      // Compaction rebuilds the index; lookups stay correct and new styles index.
+      (line as any)._compactStyles();
+      assert.equal(line.getFg(39), 40);
+      line.setCell(0, createCellData(999, 'c', 1));
+      assert.equal(line.getFg(0), 999);
+      const clone = line.clone() as TestBufferLine;
+      assert.equal(clone.getFg(39), 40);
+      assert.equal(clone.getFg(0), 999);
+      const dest = new TestBufferLine(64);
+      dest.copyFrom(line);
+      assert.equal(dest.getFg(39), 40);
+      assert.equal(dest.getFg(0), 999);
+    });
+
+    it('indexes distinct bg values sharing one fg above the threshold', () => {
+      const line = new TestBufferLine(64);
+      for (let x = 0; x < 30; x++) {
+        const cell = createCellData(1, 'a', 1);
+        cell.bg = x + 1;
+        line.setCell(x, cell);
+      }
+      for (let x = 0; x < 30; x++) {
+        assert.equal(line.getFg(x), 1);
+        assert.equal(line.getBg(x), x + 1);
+      }
+    });
+
     it('preserves unsigned attribute words and interns signed/unsigned equivalents together', () => {
       const line = new TestBufferLine(2);
       const cell = createCellData(-1, 'a', 1);

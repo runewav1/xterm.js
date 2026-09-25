@@ -46,6 +46,71 @@ export type CursorStyle = 'block' | 'underline' | 'bar';
 
 export type CursorInactiveStyle = 'outline' | 'block' | 'bar' | 'underline' | 'none';
 
+/** Visual style of the optional GPU cursor smear animation. */
+export type CursorSmearStyle = 'fade' | 'trail';
+
+/** Easing used to interpolate the smear trail between cursor positions. */
+export type CursorSmearEasing = 'linear' | 'easeOut' | 'easeInOut';
+
+/**
+ * Options for the optional GPU cursor smear. The smear trails the cursor with
+ * a short, fading ghost when it moves and is disabled by default. It is only
+ * implemented by the WebGL and WebGPU renderers; the DOM renderer ignores it.
+ */
+export interface ICursorSmearOptions {
+  /**
+   * Whether the smear is enabled. The default is false.
+   */
+  enabled?: boolean;
+  /**
+   * Total animation duration in milliseconds. The default is 120.
+   */
+  duration?: number;
+  /**
+   * Visual style of the trail. `'trail'` draws a composed tail of ghosts while
+   * `'fade'` draws a single ghost that fades out at the previous position. The
+   * default is 'trail'.
+   */
+  style?: CursorSmearStyle;
+  /**
+   * Number of ghost samples used by the `'trail'` style, clamped to 1-16. The
+   * default is 4.
+   */
+  samples?: number;
+  /**
+   * Base opacity of the smear, clamped to 0-1. The default is 0.5.
+   */
+  opacity?: number;
+  /**
+   * Overrides the smear color. Accepts any CSS color string; by default the
+   * theme's cursor color is used.
+   */
+  color?: string;
+  /**
+   * Easing used to interpolate the trail position. The default is 'easeOut'.
+   */
+  easing?: CursorSmearEasing;
+  /**
+   * Minimum cursor travel in cells required to start a smear. The default is 1.
+   */
+  minDistance?: number;
+  /**
+   * Maximum cursor travel in cells that still starts a smear. `0` disables the
+   * limit so ordinary across-line travel always smears. The default is 0.
+   */
+  maxDistance?: number;
+  /**
+   * Scale of the oldest trail ghost, clamped to 0-1, providing a taper toward
+   * the tail. `1` disables the taper. The default is 1.
+   */
+  endScale?: number;
+  /**
+   * Whether the operating system's reduced-motion preference disables the
+   * smear. The default is true.
+   */
+  respectReducedMotion?: boolean;
+}
+
 export type XtermListener = (...args: any[]) => void;
 
 /**

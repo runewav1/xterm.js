@@ -7,6 +7,7 @@ import { ITerminal } from '../../../Types';
 import { CellColorResolver } from './CellColorResolver';
 import { acquireTextureAtlas, releaseTextureAtlas } from './CharAtlasCache';
 import { CursorBlinkStateManager } from './CursorBlinkStateManager';
+import { CursorSmearModel } from './CursorSmearModel';
 import { observeDevicePixelDimensions } from './DevicePixelObserver';
 import { IRenderDimensions, IRenderer, IRequestRedrawEvent } from '../Types';
 import { ICharSizeService, ICharacterJoinerService, ICoreBrowserService, IThemeService } from '../../../services/Services';
@@ -40,6 +41,9 @@ export class GpuRenderer extends Disposable implements IRenderer {
   private _observerDisposable = this._register(new MutableDisposable());
 
   private _model: RenderModel = new RenderModel();
+  private _cursorSmear!: CursorSmearModel;
+  private _lastViewportYdisp: number = -1;
+  private _isViewportVisible: boolean = true;
   private _rowHasBlinkingCells: boolean[] = [];
   private _rowHasBlinkingCellsCount: number = 0;
   private _forceBackgroundUpdate: boolean = false;
@@ -107,6 +111,13 @@ export class GpuRenderer extends Disposable implements IRenderer {
       this.dimensions = createRenderDimensions();
       this._devicePixelRatio = this._coreBrowserService.dpr;
       this._updateDimensions();
+      this._cursorSmear = this._register(new CursorSmearModel(
+        this.dimensions,
+        this._coreBrowserService,
+        this._themeService,
+        () => this._requestRedrawCursor()
+      ));
+      this._cursorSmear.setOptions(this._optionsService.rawOptions.cursorSmear);
       this._updateCursorBlink();
       this._register(_optionsService.onOptionChange(() => this._handleOptionsChanged()));
       this._textBlinkStateManager = this._register(new TextBlinkStateManager(
@@ -171,6 +182,7 @@ export class GpuRenderer extends Disposable implements IRenderer {
   public handleResize(cols: number, rows: number): void {
     // Update character and canvas dimensions
     this._updateDimensions();
+    this._cursorSmear.setDimensions(this.dimensions);
 
     this._model.resize(this._terminal.cols, this._terminal.rows);
     this._resetBlinkingRowState();
@@ -214,6 +226,7 @@ export class GpuRenderer extends Disposable implements IRenderer {
       l.handleBlur(this._terminal);
     }
     this._cursorBlinkStateManager.value?.pause();
+    this._cursorSmear.reset();
     // Request a redraw for active/inactive selection background
     this._requestRedrawViewport();
   }
@@ -229,6 +242,10 @@ export class GpuRenderer extends Disposable implements IRenderer {
 
   public handleViewportVisibilityChange(isVisible: boolean): void {
     this._textBlinkStateManager.setViewportVisible(isVisible);
+    this._isViewportVisible = isVisible;
+    if (!isVisible) {
+      this._cursorSmear.reset();
+    }
   }
 
   public handleSelectionChanged(start: [number, number] | undefined, end: [number, number] | undefined, columnSelectMode: boolean): void {
@@ -250,6 +267,7 @@ export class GpuRenderer extends Disposable implements IRenderer {
     this._updateDimensions();
     this._refreshCharAtlas();
     this._updateCursorBlink();
+    this._cursorSmear.setOptions(this._optionsService.rawOptions.cursorSmear);
   }
 
   /**
@@ -332,6 +350,7 @@ export class GpuRenderer extends Disposable implements IRenderer {
     this._resetBlinkingRowState();
     this._textBlinkStateManager.setNeedsBlinkInViewport(false);
 
+    this._cursorSmear.reset();
     this._cursorBlinkStateManager.value?.restartBlinkAnimation();
     this._updateCursorBlink();
   }
@@ -394,6 +413,9 @@ export class GpuRenderer extends Disposable implements IRenderer {
     try {
       this._backend.beginRender(this.dimensions);
       this._rectangleRenderer.value.renderBackgrounds();
+      // Smear is drawn before glyphs and the live cursor so text and the cursor
+      // stay legible on top of the trail.
+      this._rectangleRenderer.value.renderCursorSmear(this._cursorSmear.vertices);
       this._glyphRenderer.value.render(this._model);
       if (!this._cursorBlinkStateManager.value || this._cursorBlinkStateManager.value.isCursorVisible) {
         this._rectangleRenderer.value.renderCursor();
@@ -454,10 +476,25 @@ export class GpuRenderer extends Disposable implements IRenderer {
       this._coreService.isCursorInitialized &&
       !this._coreService.isCursorHidden &&
       (!this._cursorBlinkStateManager.value || this._cursorBlinkStateManager.value.isCursorVisible);
+    // A viewport scroll moves the cursor's viewport-relative position without
+    // the cursor itself moving, so drop any in-flight smear instead of
+    // animating it across the scroll.
+    if (terminal.buffer.ydisp !== this._lastViewportYdisp) {
+      this._lastViewportYdisp = terminal.buffer.ydisp;
+      this._cursorSmear.reset();
+    }
     // Compute the cursor model independently of the dirty row range so that an
     // unrelated refresh (e.g. scrolled content) preserves bar/underline/outline
     // cursors instead of clearing them and never rebuilding them.
     this._updateCursorModel();
+    // The smear hard clears while the cursor is hidden, blinking off, blurred
+    // or scrolled out of the viewport, so no residual trail remains. Gating on
+    // visibility here (not just on the reset above) also stops later cursor
+    // updates from scheduling smear frames while the terminal is hidden.
+    const smearCursor = this._coreBrowserService.isFocused && this._isViewportVisible
+      ? this._model.cursor
+      : undefined;
+    this._cursorSmear.setCursor(smearCursor);
     let backgroundUpdated = false;
 
     for (y = start; y <= end; y++) {

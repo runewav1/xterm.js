@@ -8,7 +8,7 @@ import { IThemeService } from 'browser/services/Services';
 import { Disposable, toDisposable } from 'common/Lifecycle';
 import { Terminal } from '@xterm/xterm';
 import { RectangleRenderModel } from 'browser/renderer/shared/gpu/RectangleRenderModel';
-import { IRectangleRenderer, IRenderModel } from 'browser/renderer/shared/gpu/Types';
+import { IRectangleRenderer, IRectangleVertices, IRenderModel } from 'browser/renderer/shared/gpu/Types';
 import { IWebGL2RenderingContext, IWebGLVertexArrayObject } from './Types';
 import { createProgram, PROJECTION_MATRIX } from './WebglUtils';
 import { throwIfFalsy } from 'browser/renderer/shared/RendererUtils';
@@ -115,6 +115,18 @@ export class RectangleRenderer extends Disposable implements IRectangleRenderer 
 
   public renderCursor(): void {
     this._renderVertices(this._model.cursor);
+  }
+
+  public renderCursorSmear(vertices: IRectangleVertices): void {
+    if (vertices.count === 0) {
+      return;
+    }
+    // The smear uses straight-alpha colors and is drawn before glyphs, so it
+    // cannot rely on the glyph pass having enabled blending itself.
+    const gl = this._gl;
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    this._renderVertices(vertices);
   }
 
   private _renderVertices(vertices: { attributes: Float32Array, count: number }): void {

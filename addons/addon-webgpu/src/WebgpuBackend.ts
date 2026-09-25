@@ -6,7 +6,7 @@
 import type { Terminal } from '@xterm/xterm';
 import { GlyphRenderModel } from 'browser/renderer/shared/gpu/GlyphRenderModel';
 import { RectangleRenderModel } from 'browser/renderer/shared/gpu/RectangleRenderModel';
-import type { IGlyphRenderer, IGpuBackend, IRectangleRenderer, IRenderModel, ITextureAtlas } from 'browser/renderer/shared/gpu/Types';
+import type { IGlyphRenderer, IGpuBackend, IRectangleRenderer, IRectangleVertices, IRenderModel, ITextureAtlas } from 'browser/renderer/shared/gpu/Types';
 import type { IRenderDimensions } from 'browser/renderer/shared/Types';
 import type { IThemeService } from 'browser/services/Services';
 import { Emitter, EventUtils } from 'common/Event';
@@ -71,6 +71,7 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
   private readonly _glyphBuffer: VertexBuffer;
   private readonly _backgroundBuffer: VertexBuffer;
   private readonly _cursorBuffer: VertexBuffer;
+  private readonly _cursorSmearBuffer: VertexBuffer;
   private _atlas: ITextureAtlas | undefined;
   private _atlasGpuGeneration = -1;
   private _atlasBindGroup: GPUBindGroup | undefined;
@@ -102,6 +103,7 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
       this._glyphBuffer = this._register(new VertexBuffer(device, 'xterm glyphs'));
       this._backgroundBuffer = this._register(new VertexBuffer(device, 'xterm backgrounds'));
       this._cursorBuffer = this._register(new VertexBuffer(device, 'xterm cursor'));
+      this._cursorSmearBuffer = this._register(new VertexBuffer(device, 'xterm cursor smear'));
       this._resolutionBuffer = device.createBuffer({ label: 'xterm resolution', size: 16, usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST });
       this._rectangleBindGroup = device.createBindGroup({
         label: 'xterm rectangle viewport',
@@ -290,7 +292,7 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
     }
   }
 
-  public renderRectangles(vertices: RectangleRenderModel['backgrounds'], cursor: boolean): void {
+  public renderRectangles(vertices: IRectangleVertices, kind: 'background' | 'cursor' | 'smear'): void {
     const pass = this._pass;
     if (!pass || !vertices.count) {
       return;
@@ -299,12 +301,14 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
     if (!Number.isSafeInteger(vertices.count) || vertices.count < 0 || byteLength > vertices.attributes.byteLength) {
       throw new RangeError('Invalid WebGPU rectangle count');
     }
-    const resource = cursor ? this._cursorBuffer : this._backgroundBuffer;
+    const resource = kind === 'background' ? this._backgroundBuffer : kind === 'cursor' ? this._cursorBuffer : this._cursorSmearBuffer;
     const allocated = resource.ensure(byteLength);
     const buffer = resource.buffer!;
-    if (cursor || allocated || vertices !== this._backgroundVertices || vertices.version !== this._backgroundVersion) {
+    // Cursor and smear geometry changes every frame, so they always upload and
+    // only backgrounds can skip re-uploading an unchanged version.
+    if (kind !== 'background' || allocated || vertices !== this._backgroundVertices || vertices.version !== this._backgroundVersion) {
       this._context.device.queue.writeBuffer(buffer, 0, vertices.attributes.buffer, vertices.attributes.byteOffset, byteLength);
-      if (!cursor) {
+      if (kind === 'background') {
         this._backgroundVertices = vertices;
         this._backgroundVersion = vertices.version;
       }
@@ -407,12 +411,17 @@ class WebgpuRectangleRenderer extends Disposable implements IRectangleRenderer {
   public setDimensions(dimensions: IRenderDimensions): void { this._model.setDimensions(dimensions); }
   public renderBackgrounds(): void {
     if (!this._store.isDisposed) {
-      this._backend.renderRectangles(this._model.backgrounds, false);
+      this._backend.renderRectangles(this._model.backgrounds, 'background');
     }
   }
   public renderCursor(): void {
     if (!this._store.isDisposed) {
-      this._backend.renderRectangles(this._model.cursor, true);
+      this._backend.renderRectangles(this._model.cursor, 'cursor');
+    }
+  }
+  public renderCursorSmear(vertices: IRectangleVertices): void {
+    if (!this._store.isDisposed) {
+      this._backend.renderRectangles(vertices, 'smear');
     }
   }
 }

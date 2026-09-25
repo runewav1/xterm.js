@@ -6,6 +6,7 @@
 import { Disposable, toDisposable } from '../Lifecycle';
 import { isMac } from '../Platform';
 import { CursorStyle, IDisposable } from '../Types';
+import { sanitizeCursorSmearOptions } from '../CursorSmear';
 import { FontWeight, IOptionsService, ITerminalOptions } from './Services';
 import { Emitter } from '../Event';
 
@@ -18,6 +19,7 @@ export const DEFAULT_OPTIONS: Readonly<Required<ITerminalOptions>> = {
   cursorStyle: 'block',
   cursorWidth: 1,
   cursorInactiveStyle: 'outline',
+  cursorSmear: {},
   drawBoldTextInBrightColors: true,
   documentOverride: null,
   fastScrollSensitivity: 5,
@@ -75,6 +77,9 @@ export class OptionsService extends Disposable implements IOptionsService {
     super();
     // set the default value of each option
     const defaultOptions = { ...DEFAULT_OPTIONS };
+    // Nested option objects must be materialized per instance so mutating one
+    // terminal's options cannot leak into the shared DEFAULT_OPTIONS object.
+    defaultOptions.cursorSmear = sanitizeCursorSmearOptions(defaultOptions.cursorSmear);
     for (const key in options) {
       if (key in defaultOptions) {
         try {
@@ -175,6 +180,9 @@ export class OptionsService extends Disposable implements IOptionsService {
         if (value < 0) {
           throw new Error(`${key} cannot be less than 0, value: ${value}`);
         }
+        break;
+      case 'cursorSmear':
+        value = sanitizeCursorSmearOptions(value);
         break;
       case 'cursorWidth':
         value = Math.floor(value);

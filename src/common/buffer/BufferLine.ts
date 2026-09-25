@@ -27,7 +27,13 @@ const enum Constants {
   /** Style id for the default style (fg = 0, bg = 0). Never a real table entry. */
   DEFAULT_STYLE_ID = 0,
   /** Factor when to cleanup underlying array buffer after shrinking. */
-  CLEANUP_THRESHOLD = 2
+  CLEANUP_THRESHOLD = 2,
+  /**
+   * Table size at which a line switches from a linear style scan to a hash
+   * index. Small tables scan faster than a Map; style-heavy lines (syntax
+   * highlighting, TUI color churn) would otherwise pay an O(table) scan per cell.
+   */
+  STYLE_INDEX_THRESHOLD = 16
 }
 
 interface IExtendedAttrsExt extends IExtendedAttrs {
@@ -63,6 +69,8 @@ export class BufferLine implements IBufferLine {
   protected _styleFg: number[] = [0];
   /** Interned bg words indexed by style id; index 0 is the implicit default. */
   protected _styleBg: number[] = [0];
+  /** Lazy fg -> bg -> style id index, built once the table outgrows a linear scan. */
+  protected _styleIndex: Map<number, Map<number, number>> | undefined;
   /** Sparse cache; only read when `IS_COMBINED_MASK` is set in `_content`. */
   protected _combined: {[index: number]: string} = {};
   /** Sparse cache; only read when `HAS_EXTENDED` is set in the bg word. */
@@ -107,9 +115,16 @@ export class BufferLine implements IBufferLine {
     if (fgs[last] === fg && bgs[last] === bg) {
       return last;
     }
-    for (let i = 1; i < fgs.length; i++) {
-      if (fgs[i] === fg && bgs[i] === bg) {
-        return i;
+    if (fgs.length > Constants.STYLE_INDEX_THRESHOLD) {
+      const id = (this._styleIndex ??= this._buildStyleIndex()).get(fg)?.get(bg);
+      if (id !== undefined) {
+        return id;
+      }
+    } else {
+      for (let i = 1; i < fgs.length; i++) {
+        if (fgs[i] === fg && bgs[i] === bg) {
+          return i;
+        }
       }
     }
     if (fgs.length >= Math.max(32, this._styleIds.length * 2) ||
@@ -125,7 +140,36 @@ export class BufferLine implements IBufferLine {
     }
     fgs.push(fg);
     bgs.push(bg);
+    this._indexStyle(fg, bg, id);
     return id;
+  }
+
+  /** Keep the lazy hash index in step with an appended style. */
+  private _indexStyle(fg: number, bg: number, id: number): void {
+    if (this._styleIndex) {
+      let byBg = this._styleIndex.get(fg);
+      if (!byBg) {
+        byBg = new Map();
+        this._styleIndex.set(fg, byBg);
+      }
+      byBg.set(bg, id);
+    } else if (this._styleFg.length > Constants.STYLE_INDEX_THRESHOLD) {
+      this._styleIndex = this._buildStyleIndex();
+    }
+  }
+
+  private _buildStyleIndex(): Map<number, Map<number, number>> {
+    const index = new Map<number, Map<number, number>>();
+    for (let i = 1; i < this._styleFg.length; i++) {
+      const fg = this._styleFg[i];
+      let byBg = index.get(fg);
+      if (!byBg) {
+        byBg = new Map();
+        index.set(fg, byBg);
+      }
+      byBg.set(this._styleBg[i], i);
+    }
+    return index;
   }
 
   private _compactStyles(): void {
@@ -145,6 +189,7 @@ export class BufferLine implements IBufferLine {
     }
     this._styleFg = fgs;
     this._styleBg = bgs;
+    this._styleIndex = undefined;
   }
 
   /**
@@ -533,6 +578,7 @@ export class BufferLine implements IBufferLine {
     this._extendedAttrs = {};
     this._styleFg = [0];
     this._styleBg = [0];
+    this._styleIndex = undefined;
     for (let i = 0; i < this.length; ++i) {
       this.setCell(i, fillCellData);
     }
@@ -716,6 +762,7 @@ export class BufferLine implements IBufferLine {
 
   /** Copy the source line's interned style table so ids stay valid. */
   private _copyStyleTableFrom(line: BufferLine): void {
+    this._styleIndex = undefined;
     if (line._styleFg.length <= 1) {
       this._styleFg = [0];
       this._styleBg = [0];

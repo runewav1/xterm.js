@@ -51,10 +51,23 @@ export interface IGlyphRenderer extends IDisposable {
 export interface IRectangleRenderer extends IDisposable {
   renderBackgrounds(): void;
   renderCursor(): void;
+  renderCursorSmear(vertices: IRectangleVertices): void;
   handleResize(): void;
   setDimensions(dimensions: IRenderDimensions): void;
   updateBackgrounds(model: IRenderModel, startRow: number, endRow: number): void;
   updateCursor(model: IRenderModel): void;
+}
+
+/**
+ * A packed vertex stream of instanced rectangles, laid out as
+ * `[x, y, width, height, r, g, b, a]` per rectangle with positions normalized
+ * against the device canvas. Shared by the background, cursor and cursor smear
+ * streams so every backend can draw them with one pipeline.
+ */
+export interface IRectangleVertices {
+  attributes: Float32Array;
+  count: number;
+  version: number;
 }
 
 export interface ICharAtlasConfig {

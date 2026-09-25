@@ -72,6 +72,80 @@ describe('OptionsService', () => {
       assert.equal(service.options.fontWeight, DEFAULT_OPTIONS.fontWeight, 'Wrong string literals should be reset to default');
     });
   });
+  describe('cursorSmear', () => {
+    it('resolves sensible defaults that are disabled', () => {
+      const service = new OptionsService({});
+      assert.deepEqual(service.options.cursorSmear, {
+        enabled: false,
+        duration: 120,
+        style: 'trail',
+        samples: 4,
+        opacity: 0.5,
+        color: undefined,
+        easing: 'easeOut',
+        minDistance: 1,
+        maxDistance: 0,
+        endScale: 1,
+        respectReducedMotion: true
+      });
+    });
+    it('clamps and normalizes numeric values', () => {
+      const service = new OptionsService({});
+      service.options.cursorSmear = {
+        enabled: true,
+        duration: 999999,
+        samples: 999,
+        opacity: -1,
+        endScale: 2,
+        minDistance: -5,
+        maxDistance: 3
+      };
+      assert.equal(service.options.cursorSmear.duration, 5000);
+      assert.equal(service.options.cursorSmear.samples, 16);
+      assert.equal(service.options.cursorSmear.opacity, 0);
+      assert.equal(service.options.cursorSmear.endScale, 1);
+      assert.equal(service.options.cursorSmear.minDistance, 0);
+      assert.equal(service.options.cursorSmear.maxDistance, 3);
+    });
+    it('lifts maxDistance to minDistance when inconsistent', () => {
+      const service = new OptionsService({});
+      service.options.cursorSmear = { minDistance: 5, maxDistance: 3 };
+      assert.equal(service.options.cursorSmear.maxDistance, 5);
+    });
+    it('coerces non-finite numbers to defaults', () => {
+      const service = new OptionsService({});
+      service.options.cursorSmear = { duration: NaN, samples: Infinity, opacity: NaN, endScale: NaN };
+      assert.equal(service.options.cursorSmear.duration, 120);
+      assert.equal(service.options.cursorSmear.samples, 4);
+      assert.equal(service.options.cursorSmear.opacity, 0.5);
+      assert.equal(service.options.cursorSmear.endScale, 1);
+    });
+    it('rejects invalid enums and colors', () => {
+      const service = new OptionsService({});
+      assert.throws(() => service.options.cursorSmear = { style: 'comet' as any }, 'style');
+      assert.throws(() => service.options.cursorSmear = { easing: 'bounce' as any }, 'easing');
+      assert.throws(() => service.options.cursorSmear = { color: 'not-a-color' }, 'color');
+    });
+    it('does not share the default object across instances', () => {
+      const a = new OptionsService({});
+      const b = new OptionsService({});
+      assert.notStrictEqual(a.options.cursorSmear, b.options.cursorSmear);
+      a.options.cursorSmear.enabled = true;
+      assert.equal(b.options.cursorSmear.enabled, false);
+      assert.equal(DEFAULT_OPTIONS.cursorSmear.enabled, undefined);
+    });
+    it('fires the option change event on reassignment', async () => {
+      const service = new OptionsService({});
+      await new Promise<void>(r => {
+        service.onSpecificOptionChange('cursorSmear', value => {
+          assert.equal(value!.enabled, true);
+          r();
+        });
+        service.options.cursorSmear = { enabled: true };
+      });
+    });
+  });
+
   describe('onOptionChange', () => {
     let service: OptionsService;
     beforeEach(() => {

@@ -50,6 +50,11 @@ function createFakeGl(): { gl: IWebGL2RenderingContext, bufferDatas: IBufferData
     DYNAMIC_DRAW: 0x88E8,
     TRIANGLE_STRIP: 0x5,
     UNSIGNED_BYTE: 0x1401,
+    BLEND: 0x0BE2,
+    SRC_ALPHA: 0x0302,
+    ONE_MINUS_SRC_ALPHA: 0x0303,
+    enable: () => {},
+    blendFunc: () => {},
     createProgram: () => ({}),
     createShader: () => ({}),
     shaderSource: () => {},
@@ -136,6 +141,23 @@ describe('RectangleRenderer', () => {
   it('skips cursor rendering when no cursor is present', () => {
     renderer.updateCursor(model);
     renderer.renderCursor();
+    assert.strictEqual(glEnv.drawInstances.length, 0);
+  });
+
+  it('draws smear vertices and enables alpha blending', () => {
+    const calls: string[] = [];
+    (glEnv.gl as any).enable = () => calls.push('enable');
+    (glEnv.gl as any).blendFunc = () => calls.push('blendFunc');
+    const attributes = new Float32Array(8);
+    renderer.renderCursorSmear({ attributes, count: 1, version: 0 });
+    assert.deepEqual(calls, ['enable', 'blendFunc']);
+    assert.strictEqual(glEnv.drawInstances.length, 1);
+    assert.strictEqual(glEnv.drawInstances[0].instanceCount, 1);
+    assert.strictEqual((glEnv.bufferDatas[glEnv.bufferDatas.length - 1].data as Float32Array).byteLength, 8 * Float32Array.BYTES_PER_ELEMENT);
+  });
+
+  it('skips smear rendering when there are no vertices', () => {
+    renderer.renderCursorSmear({ attributes: new Float32Array(0), count: 0, version: 0 });
     assert.strictEqual(glEnv.drawInstances.length, 0);
   });
 });

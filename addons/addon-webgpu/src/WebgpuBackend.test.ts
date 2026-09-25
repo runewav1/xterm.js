@@ -1068,6 +1068,20 @@ describe('WebgpuBackend', () => {
     assert.strictEqual(missing.state.deviceDestroyed, 0);
   });
 
+  it('draws cursor smear geometry into a dedicated buffer on every frame', () => {
+    const attributes = new Float32Array([0.1, 0.2, 0.3, 0.4, 1, 0, 0, 0.5]);
+    const vertices = { attributes, count: 1, version: 0 };
+    backend.beginRender(dimensions);
+    rectangleRenderer.renderCursorSmear(vertices);
+    rectangleRenderer.renderCursorSmear(vertices);
+    backend.endRender();
+    const writes = gpu.writes.filter(e => e.buffer.label === 'xterm cursor smear');
+    assert.strictEqual(writes.length, 2, 'smear uploads every frame regardless of version');
+    const draws = gpu.draws.filter(e => e.buffer.label === 'xterm cursor smear');
+    assert.strictEqual(draws.length, 2);
+    assert.deepEqual(Array.from(draws[0].submitted!).slice(0, 8), Array.from(attributes));
+  });
+
   it('generates top-left geometry, explicit-LOD page switches and premultiplied rectangles', () => {
     const shader = createGlyphShader(4);
     assert.include(shader, '1.0 - 2.0 * position.y');
