@@ -904,4 +904,59 @@ describe('BufferLine', function(): void {
       });
     });
   });
+
+  describe('interned styles', () => {
+    it('keeps a default line table empty and shares repeated styles', () => {
+      const line = new TestBufferLine(4);
+      // All-default cells need no style table entries (id 0 is implicit).
+      assert.equal((line as any)._styleFg.length, 1);
+      assert.equal((line as any)._styleBg.length, 1);
+
+      // Two cells with the same non-default style share one table entry.
+      line.setCell(0, createCellData(1, 'a', 1));
+      line.setCell(1, createCellData(1, 'b', 1));
+      assert.equal((line as any)._styleFg.length, 2);
+      assert.equal((line as any)._styleIds[0], (line as any)._styleIds[1]);
+
+      // A different style grows the table.
+      line.setCell(2, createCellData(2, 'c', 1));
+      assert.equal((line as any)._styleFg.length, 3);
+      assert.notEqual((line as any)._styleIds[1], (line as any)._styleIds[2]);
+
+      // fg/bg round-trip through the table.
+      assert.equal(line.getFg(0), 1);
+      assert.equal(line.getFg(2), 2);
+      assert.equal(line.getBg(0), 0);
+    });
+
+    it('remaps interned styles when copying cells between lines', () => {
+      const src = new TestBufferLine(4);
+      src.setCell(0, createCellData(3, 'x', 1));
+      src.setCell(1, createCellData(4, 'y', 1));
+
+      // Destination already holds an unrelated style, so its ids differ from src.
+      const dest = new TestBufferLine(4);
+      dest.setCell(0, createCellData(7, 'z', 1));
+
+      dest.copyCellsFrom(src, 0, 1, 2, false);
+
+      // Copied cells must carry the source styles, not the destination's ids.
+      assert.equal(dest.getFg(1), 3);
+      assert.equal(dest.getFg(2), 4);
+      assert.equal(dest.getString(1), 'x');
+      assert.equal(dest.getString(2), 'y');
+      // The pre-existing destination cell is untouched.
+      assert.equal(dest.getFg(0), 7);
+    });
+
+    it('keeps the style table valid through clone and copyFrom', () => {
+      const line = new TestBufferLine(3);
+      line.setCell(0, createCellData(5, 'a', 1));
+      const clone = line.clone() as TestBufferLine;
+      assert.equal(clone.getFg(0), 5);
+      const dest = new TestBufferLine(3);
+      dest.copyFrom(line);
+      assert.equal(dest.getFg(0), 5);
+    });
+  });
 });

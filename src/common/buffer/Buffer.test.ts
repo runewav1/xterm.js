@@ -1278,9 +1278,11 @@ describe('Buffer', () => {
       for (let i = 0; i < INIT_ROWS; i++) {
         const line = buffer.lines.get(i)!;
         // line memory is still at old size from initialization
-        assert.equal((line as any)._data.buffer.byteLength, INIT_COLS * 3 * 4);
+        assert.equal((line as any)._content.buffer.byteLength, INIT_COLS * 4);
+        assert.equal((line as any)._styleIds.buffer.byteLength, INIT_COLS * 2);
         // array.length and .length get immediately adjusted
-        assert.equal((line as any)._data.length, (INIT_COLS / 2 - 1) * 3);
+        assert.equal((line as any)._content.length, INIT_COLS / 2 - 1);
+        assert.equal((line as any)._styleIds.length, INIT_COLS / 2 - 1);
         assert.equal(line.length, INIT_COLS / 2 - 1);
       }
 
@@ -1291,7 +1293,8 @@ describe('Buffer', () => {
       // cleanup should have realigned memory with exact bytelength
       for (let i = 0; i < INIT_ROWS; i++) {
         const line = buffer.lines.get(i)!;
-        assert.equal((line as any)._data.buffer.byteLength, (INIT_COLS / 2 - 1) * 3 * 4);
+        assert.equal((line as any)._content.buffer.byteLength, (INIT_COLS / 2 - 1) * 4);
+        assert.equal((line as any)._styleIds.buffer.byteLength, (INIT_COLS / 2 - 1) * 2);
       }
     });
   });
