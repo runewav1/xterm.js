@@ -457,7 +457,13 @@ function drawPathNegativeDefinitionCharacter(
   ctx.restore();
 }
 
-const cachedPatterns: Map<CustomGlyphPatternDefinition, Map</* fillStyle */string, CanvasPattern>> = new Map();
+const enum PatternCacheConstants {
+  MAX_COLORS_PER_PATTERN = 4096
+}
+
+// Definitions are shared by the fixed custom glyph set. Bound each definition's truecolor cache
+// independently so one shade pattern cannot evict all colors of another.
+const cachedPatterns = new WeakMap<CustomGlyphPatternDefinition, Map</* fillStyle */string, CanvasPattern>>();
 
 function drawPatternChar(
   ctx: CanvasRenderingContext2D,
@@ -513,8 +519,14 @@ function drawPatternChar(
     }
     tmpCtx.putImageData(imageData, 0, 0);
     pattern = throwIfFalsy(ctx.createPattern(tmpCanvas, null));
-    patternSet.set(fillStyle, pattern);
+    if (patternSet.size >= PatternCacheConstants.MAX_COLORS_PER_PATTERN) {
+      patternSet.delete(patternSet.keys().next().value!);
+    }
+  } else {
+    // Refresh insertion order to keep recently used colors when the cache reaches its limit.
+    patternSet.delete(fillStyle);
   }
+  patternSet.set(fillStyle, pattern);
   // Apply pattern offset to ensure seamless tiling across cells when cell dimensions are odd.
   // variantOffset encodes: bit 1 = x pixel shift, bit 0 = y pixel shift.
   const dx = (variantOffset >> 1) & 1;

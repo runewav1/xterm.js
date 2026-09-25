@@ -13,11 +13,11 @@ import { stringFromCodePoint } from '../input/TextDecoder';
 //
 //   _content  `Uint32Array` - wcwidth(2) combined(1) codepoint(21)  -> 4B/cell
 //   _styleIds `Uint16Array` - index into the per-line style table   -> 2B/cell
+//              (promoted to Uint32Array only if 16-bit ids are exhausted)
 //
 // The two fg/bg words (previously 8B/cell) are replaced by a per-line interned
-// style table. Style id 0 is the implicit default (fg = 0, bg = 0) and is never
-// stored, so a default-styled cell costs no table lookup and a default line
-// keeps an empty table. This mirrors the style-id interning used by Ghostty
+// style table. Style id 0 is the default (fg = 0, bg = 0); a default line
+// keeps only that sentinel entry. This mirrors the style-id interning used by Ghostty
 // (per-page `StyleSet` with `default_id = 0`) and the inline-fast-path /
 // out-of-line-slow-path split used by Alacritty and WezTerm. Rare data -
 // extended attributes and combined strings - stays in the sparse per-line maps,
@@ -58,7 +58,7 @@ const $extended = DEFAULT_ATTR_DATA.extended.clone() as IExtendedAttrsExt;
  */
 export class BufferLine implements IBufferLine {
   protected _content: Uint32Array;
-  protected _styleIds: Uint16Array;
+  protected _styleIds: Uint16Array | Uint32Array;
   /** Interned fg words indexed by style id; index 0 is the implicit default. */
   protected _styleFg: number[] = [0];
   /** Interned bg words indexed by style id; index 0 is the implicit default. */
@@ -91,24 +91,60 @@ export class BufferLine implements IBufferLine {
   /**
    * Intern an fg/bg pair into this line's style table and return its id.
    * Id 0 is implicit (fg = 0, bg = 0), so the default case is a single compare
-   * and never grows the table. The table is bounded by the column count, which
-   * is far below the 16-bit id limit.
+   * and never grows the table. Reclaim obsolete styles periodically during repainting.
    */
   private _internStyle(fg: number, bg: number): number {
+    // Preserve the unsigned-word semantics of the original Uint32Array storage.
+    fg >>>= 0;
+    bg >>>= 0;
     if (fg === 0 && bg === 0) {
       return Constants.DEFAULT_STYLE_ID;
     }
-    const fgs = this._styleFg;
-    const bgs = this._styleBg;
+    let fgs = this._styleFg;
+    let bgs = this._styleBg;
+    // Consecutive writes commonly use the most recently added style.
+    const last = fgs.length - 1;
+    if (fgs[last] === fg && bgs[last] === bg) {
+      return last;
+    }
     for (let i = 1; i < fgs.length; i++) {
       if (fgs[i] === fg && bgs[i] === bg) {
         return i;
       }
     }
+    if (fgs.length >= Math.max(32, this._styleIds.length * 2) ||
+        (fgs.length === 0x10000 && this._styleIds instanceof Uint16Array)) {
+      this._compactStyles();
+      fgs = this._styleFg;
+      bgs = this._styleBg;
+    }
     const id = fgs.length;
+    if (id > 0xFFFF && this._styleIds instanceof Uint16Array) {
+      // Extremely wide lines can have more live styles than a 16-bit id can represent.
+      this._styleIds = new Uint32Array(this._styleIds);
+    }
     fgs.push(fg);
     bgs.push(bg);
     return id;
+  }
+
+  private _compactStyles(): void {
+    const fgs = [0];
+    const bgs = [0];
+    const remap = new Map<number, number>([[0, 0]]);
+    for (let i = 0; i < this._styleIds.length; i++) {
+      const oldId = this._styleIds[i];
+      let id = remap.get(oldId);
+      if (id === undefined) {
+        id = fgs.length;
+        remap.set(oldId, id);
+        fgs.push(this._styleFg[oldId]);
+        bgs.push(this._styleBg[oldId]);
+      }
+      this._styleIds[i] = id;
+    }
+    this._styleFg = fgs;
+    this._styleBg = bgs;
   }
 
   /**
@@ -137,7 +173,8 @@ export class BufferLine implements IBufferLine {
   public set(index: number, value: CharData): void {
     this._cacheValid = false;
     // The legacy CharData form carries only an fg attr; keep the cell's bg.
-    this._styleIds[index] = this._internStyle(value[CHAR_DATA_ATTR_INDEX], this.getBg(index));
+    const styleId = this._internStyle(value[CHAR_DATA_ATTR_INDEX], this.getBg(index));
+    this._styleIds[index] = styleId;
     if (value[CHAR_DATA_CHAR_INDEX].length > 1) {
       this._combined[index] = value[1];
       this._content[index] = index | Content.IS_COMBINED_MASK | (value[CHAR_DATA_WIDTH_INDEX] << Content.WIDTH_SHIFT);
@@ -258,7 +295,8 @@ export class BufferLine implements IBufferLine {
       this._extendedAttrs[index] = cell.extended;
     }
     this._content[index] = cell.content;
-    this._styleIds[index] = this._internStyle(cell.fg, cell.bg);
+    const styleId = this._internStyle(cell.fg, cell.bg);
+    this._styleIds[index] = styleId;
   }
 
   /**
@@ -272,7 +310,8 @@ export class BufferLine implements IBufferLine {
       this._extendedAttrs[index] = attrs.extended;
     }
     this._content[index] = codePoint | (width << Content.WIDTH_SHIFT);
-    this._styleIds[index] = this._internStyle(attrs.fg, attrs.bg);
+    const styleId = this._internStyle(attrs.fg, attrs.bg);
+    this._styleIds[index] = styleId;
   }
 
   /**
@@ -418,10 +457,11 @@ export class BufferLine implements IBufferLine {
         content.set(this._content);
         this._content = content;
       }
-      if (this._styleIds.buffer.byteLength >= cols * 2) {
-        this._styleIds = new Uint16Array(this._styleIds.buffer, 0, cols);
+      const styleIdsConstructor = this._styleIds instanceof Uint16Array ? Uint16Array : Uint32Array;
+      if (this._styleIds.buffer.byteLength >= cols * styleIdsConstructor.BYTES_PER_ELEMENT) {
+        this._styleIds = new styleIdsConstructor(this._styleIds.buffer, 0, cols);
       } else {
-        const styleIds = new Uint16Array(cols);
+        const styleIds = new styleIdsConstructor(cols);
         styleIds.set(this._styleIds);
         this._styleIds = styleIds;
       }
@@ -432,6 +472,9 @@ export class BufferLine implements IBufferLine {
       // optimization: just shrink the view on existing buffer
       this._content = this._content.subarray(0, cols);
       this._styleIds = this._styleIds.subarray(0, cols);
+      if (this._styleFg.length > Math.max(32, cols * 2)) {
+        this._compactStyles();
+      }
       // Remove any cut off combined data
       const keys = Object.keys(this._combined);
       for (let i = 0; i < keys.length; i++) {
@@ -467,10 +510,8 @@ export class BufferLine implements IBufferLine {
       this._content = content;
       cleaned = 1;
     }
-    if (this._styleIds.length * 2 * Constants.CLEANUP_THRESHOLD < this._styleIds.buffer.byteLength) {
-      const styleIds = new Uint16Array(this._styleIds.length);
-      styleIds.set(this._styleIds);
-      this._styleIds = styleIds;
+    if (this._styleIds.byteLength * Constants.CLEANUP_THRESHOLD < this._styleIds.buffer.byteLength) {
+      this._styleIds = this._styleIds.slice();
       cleaned = 1;
     }
     return cleaned;
@@ -499,13 +540,20 @@ export class BufferLine implements IBufferLine {
 
   /** alter to a full copy of line  */
   public copyFrom(line: BufferLine, blank?: boolean): void {
+    if (line === this) {
+      return;
+    }
     if (this.length !== line.length) {
       this._content = new Uint32Array(line._content);
-      this._styleIds = new Uint16Array(line._styleIds);
+      this._styleIds = line._styleIds.slice();
     } else {
       // use high speed copy if lengths are equal
       this._content.set(line._content);
-      this._styleIds.set(line._styleIds);
+      if (this._styleIds.BYTES_PER_ELEMENT < line._styleIds.BYTES_PER_ELEMENT) {
+        this._styleIds = line._styleIds.slice();
+      } else {
+        this._styleIds.set(line._styleIds);
+      }
     }
     this._copyStyleTableFrom(line);
     this.length = line.length;
@@ -526,7 +574,7 @@ export class BufferLine implements IBufferLine {
   public clone(blank?: boolean): IBufferLine {
     const newLine = new BufferLine(0, undefined, false);
     newLine._content = new Uint32Array(this._content);
-    newLine._styleIds = new Uint16Array(this._styleIds);
+    newLine._styleIds = this._styleIds.slice();
     newLine._styleFg = this._styleFg.slice();
     newLine._styleBg = this._styleBg.slice();
     newLine.length = this.length;
@@ -561,14 +609,17 @@ export class BufferLine implements IBufferLine {
     this._cacheValid = false;
     const content = this._content;
     const srcContent = src._content;
-    const styleIds = this._styleIds;
     const srcStyleIds = src._styleIds;
     const srcFg = src._styleFg;
     const srcBg = src._styleBg;
     // Destination and source have independent interned style tables, so source
     // style ids must be remapped. Distinct source ids are remapped once per call.
     let remap: Map<number, number> | undefined;
+    let destFg = this._styleFg;
     const remapStyle = (srcId: number): number => {
+      if (src === this) {
+        return srcId;
+      }
       if (srcId === Constants.DEFAULT_STYLE_ID) {
         return Constants.DEFAULT_STYLE_ID;
       }
@@ -576,6 +627,11 @@ export class BufferLine implements IBufferLine {
       let destId = remap.get(srcId);
       if (destId === undefined) {
         destId = this._internStyle(srcFg[srcId], srcBg[srcId]);
+        if (destFg !== this._styleFg) {
+          // Compaction renumbers destination ids, including any cached mappings.
+          remap.clear();
+          destFg = this._styleFg;
+        }
         remap.set(srcId, destId);
       }
       return destId;
@@ -585,7 +641,8 @@ export class BufferLine implements IBufferLine {
         const s = srcCol + cell;
         const d = destCol + cell;
         content[d] = srcContent[s];
-        styleIds[d] = remapStyle(srcStyleIds[s]);
+        const styleId = remapStyle(srcStyleIds[s]);
+        this._styleIds[d] = styleId;
         this._copyCellMapsFrom(src, s, d);
       }
     } else {
@@ -593,7 +650,8 @@ export class BufferLine implements IBufferLine {
         const s = srcCol + cell;
         const d = destCol + cell;
         content[d] = srcContent[s];
-        styleIds[d] = remapStyle(srcStyleIds[s]);
+        const styleId = remapStyle(srcStyleIds[s]);
+        this._styleIds[d] = styleId;
         this._copyCellMapsFrom(src, s, d);
       }
     }

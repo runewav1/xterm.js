@@ -906,6 +906,87 @@ describe('BufferLine', function(): void {
   });
 
   describe('interned styles', () => {
+    it('bounds style retention during repeated truecolor repainting without losing live styles', () => {
+      const line = new TestBufferLine(4);
+      line.setCell(1, createCellData(0xABCDEF, 'b', 1));
+      const attrs = new AttributeData();
+      for (let fg = 1; fg <= 70000; fg++) {
+        attrs.fg = fg;
+        line.setCellFromCodepoint(0, 97, 1, attrs);
+        assert.equal(line.getFg(0), fg);
+      }
+      assert.equal(line.getFg(1), 0xABCDEF);
+      assert.equal(line.getFg(2), 0);
+      assert.isAtMost((line as any)._styleFg.length, 32);
+    });
+
+    it('preserves unsigned attribute words and interns signed/unsigned equivalents together', () => {
+      const line = new TestBufferLine(2);
+      const cell = createCellData(-1, 'a', 1);
+      cell.bg = -2147483648;
+      line.setCell(0, cell);
+      cell.fg = 0xFFFFFFFF;
+      cell.bg = 0x80000000;
+      line.setCell(1, cell);
+      assert.equal(line.getFg(0), 0xFFFFFFFF);
+      assert.equal(line.getBg(0), 0x80000000);
+      assert.equal((line as any)._styleIds[0], (line as any)._styleIds[1]);
+    });
+
+    it('keeps cross-line copy mappings valid when the destination compacts mid-copy', () => {
+      for (const reverse of [false, true]) {
+        const src = new TestBufferLine(4);
+        for (let i = 0; i < 4; i++) {
+          src.setCell(i, createCellData(i % 2 + 100, 'x', 1));
+        }
+        const dest = new TestBufferLine(4);
+        for (let fg = 1; fg <= 30; fg++) {
+          dest.setCell(0, createCellData(fg, 'z', 1));
+        }
+        dest.copyCellsFrom(src, 0, 0, 4, reverse);
+        for (let i = 0; i < 4; i++) {
+          assert.equal(dest.getFg(i), src.getFg(i));
+        }
+      }
+    });
+
+    it('preserves sparse cell data when copying a line onto itself', () => {
+      const line = new TestBufferLine(2);
+      line.setCell(0, createCellData(1, 'ab', 1));
+      const cell = createCellData(2, 'c', 1);
+      cell.bg |= BgFlags.HAS_EXTENDED;
+      cell.extended.underlineStyle = UnderlineStyle.CURLY;
+      line.setCell(1, cell);
+      line.copyFrom(line);
+      assert.equal(line.getString(0), 'ab');
+      assert.equal(line.getExtended(1).underlineStyle, UnderlineStyle.CURLY);
+    });
+
+    it('supports more than 65535 live styles and preserves them across resizing and copying', () => {
+      const line = new TestBufferLine(65536);
+      // Seed a valid full 16-bit table without quadratic fixture setup.
+      const internals = line as any;
+      internals._styleFg = Array.from({ length: 65536 }, (_, i) => i);
+      internals._styleBg = new Array(65536).fill(0);
+      for (let i = 0; i < 65535; i++) {
+        internals._styleIds[i] = i + 1;
+      }
+      line.setCell(65535, createCellData(65536, 'x', 1));
+      assert.equal(line.getFg(65535), 65536);
+      assert.equal(line.getFg(0), 1);
+      assert.equal(line.clone().getFg(65535), 65536);
+      const dest = new TestBufferLine(65536);
+      dest.copyFrom(line);
+      assert.equal(dest.getFg(65535), 65536);
+      line.resize(65537, NULL_CELL_DATA);
+      assert.equal(line.getFg(65535), 65536);
+      line.resize(2, NULL_CELL_DATA);
+      line.cleanupMemory();
+      assert.equal(line.getFg(0), 1);
+      assert.equal(line.getFg(1), 2);
+      assert.isAtMost(internals._styleFg.length, 3);
+    });
+
     it('keeps a default line table empty and shares repeated styles', () => {
       const line = new TestBufferLine(4);
       // All-default cells need no style table entries (id 0 is implicit).

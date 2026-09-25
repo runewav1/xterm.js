@@ -4,6 +4,7 @@
  */
 
 import { Font, loadBuffer } from './fontLigatures/index';
+import { memoize } from './fontCache';
 
 import parse from './parse';
 
@@ -27,11 +28,24 @@ let fontsPromise: Promise<Record<string, IFontMetadata[]>> | undefined = undefin
 
 /**
  * Loads the font ligature wrapper for the specified font family if it could be
- * resolved, throwing if it is unable to find a suitable match.
+ * resolved, returning undefined if no suitable match is found.
+ *
+ * Results are shared across callers: a multi-pane workspace parses and holds one
+ * ligature table per font family instead of one per terminal.
+ *
  * @param fontFamily The CSS font family definition to resolve
  * @param cacheSize The size of the ligature cache to maintain if the font is resolved
  */
-export default async function load(fontFamily: string, cacheSize: number): Promise<Font | undefined> {
+export default function load(fontFamily: string, cacheSize: number): Promise<Font | undefined> {
+  return loadCached(fontFamily, cacheSize);
+}
+
+const loadCached = memoize(
+  (fontFamily: string, cacheSize: number) => `${cacheSize}\0${fontFamily}`,
+  loadFont
+);
+
+async function loadFont(fontFamily: string, cacheSize: number): Promise<Font | undefined> {
   if (!fontsPromise) {
     // Web environment that supports font access API
     if (typeof navigator !== 'undefined' && 'fonts' in navigator) {

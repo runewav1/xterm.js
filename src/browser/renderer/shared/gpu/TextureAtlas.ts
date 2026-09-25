@@ -280,6 +280,10 @@ export class TextureAtlas implements ITextureAtlas {
       if (index !== -1) {
         this._activePages.splice(index, 1);
       }
+      // Pixels and glyph metadata now belong to mergedPage. Release the old backing store even
+      // if a consumer retains the removed canvas (as in the eviction path).
+      p.canvas.remove();
+      p.canvas.width = p.canvas.height = 0;
     }
     return mergedPage;
   }
