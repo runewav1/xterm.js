@@ -1506,51 +1506,104 @@ export function injectSharedRendererTestsStandalone(ctx: ISharedRendererTestCont
 }
 
 /**
- * Pixel-level cursor smear tests. Injected only into the WebGL and WebGPU
- * suites because the DOM renderer ignores the `cursorSmear` option.
+ * Pixel-level cursor trail tests. Injected only into the WebGL and WebGPU
+ * suites because the DOM renderer ignores the `cursorTrail` option.
  */
-export function injectSharedCursorSmearTests(ctx: ISharedRendererTestContext): void {
-  test.describe('cursor smear', () => {
+export function injectSharedCursorTrailTests(ctx: ISharedRendererTestContext): void {
+  test.describe('cursor trail', () => {
     test.beforeEach(async () => {
       await ctx.value.proxy.reset();
       await ctx.value.page.evaluate(`
         window.term.options.cursorBlink = false;
         window.term.options.cursorStyle = 'block';
         window.term.options.cursorInactiveStyle = 'block';
-        window.term.options.cursorSmear = { enabled: false };
+        window.term.options.cursorTrail = 0;
+        window.term.options.cursorTrailColor = 'none';
+        window.term.options.cursorTrailDecay = [2, 2];
         window.term.options.theme = { background: '#000000', foreground: '#ffffff', cursor: '#ffffff' };
       `);
       await ctx.value.proxy.focus();
       frameDetails = undefined;
     });
 
-    test('renders a translucent trail and clears it when disabled', async () => {
-      await ctx.value.page.evaluate(`window.term.options.cursorSmear = {
-        enabled: true, style: 'fade', duration: 5000, opacity: 1, samples: 1, color: '#ff000080'
-      };`);
-      // Render the initial position first so the smear model observes it as a
-      // baseline before the cursor moves away.
+    test('renders a trail along the travel path and clears it when disabled', async () => {
+      await ctx.value.page.evaluate(`window.term.options.cursorTrail = 1; window.term.options.cursorTrailColor = '#ff0000';`);
+      // Establish the initial cursor position; the first accepted move will
+      // consume the idle gap as opacity ramp time.
       await waitForRenderAfter(ctx.value, () => ctx.value.proxy.write('\x1b[1;1H'));
-      await ctx.value.proxy.write('\x1b[1;4H');
-      // 50% red over the black background at the previous cursor cell.
-      await pollForApproximate(ctx.value.page, 64, () => getCellColor(ctx.value, 1, 1), [128, 0, 0, 255], async () => { frameDetails = undefined; }, 1500);
-      await ctx.value.page.evaluate(`window.term.options.cursorSmear = { enabled: false };`);
-      await pollForApproximate(ctx.value.page, 4, () => getCellColor(ctx.value, 1, 1), [0, 0, 0, 255], async () => { frameDetails = undefined; }, 1500);
+      await ctx.value.page.waitForTimeout(400);
+      await ctx.value.proxy.write('\x1b[1;5H');
+      // The trail sweeps from column 1 to column 5, so the midpoint (column 3)
+      // is covered for most of the animation. The tolerance is wide because the
+      // opacity is still ramping.
+      await pollForApproximate(ctx.value.page, 96, () => getCellColor(ctx.value, 3, 1), [128, 0, 0, 255], async () => { frameDetails = undefined; }, 1500);
+      await ctx.value.page.evaluate(`window.term.options.cursorTrail = 0;`);
+      await pollForApproximate(ctx.value.page, 16, () => getCellColor(ctx.value, 3, 1), [0, 0, 0, 255], async () => { frameDetails = undefined; }, 1500);
     });
 
     test('does not tint the live block cursor cell', async () => {
-      await ctx.value.page.evaluate(`window.term.options.cursorSmear = {
-        enabled: true, style: 'trail', duration: 5000, opacity: 1, samples: 16, easing: 'linear', color: '#ff0000'
-      };`);
+      await ctx.value.page.evaluate(`window.term.options.cursorTrail = 1; window.term.options.cursorTrailColor = '#ff0000';`);
       await waitForRenderAfter(ctx.value, () => ctx.value.proxy.write('\x1b[1;1H'));
-      await ctx.value.proxy.write('\x1b[1;4H');
-      // After the travel phase the head sits on the destination cell while the
-      // trail is still fading; without clipping the live block cell would be
-      // tinted red instead of the pure theme color.
-      await ctx.value.page.waitForTimeout(4000);
-      await pollForApproximate(ctx.value.page, 4, () => getCellColor(ctx.value, 4, 1), [255, 255, 255, 255], async () => { frameDetails = undefined; }, 700);
+      await ctx.value.page.waitForTimeout(400);
+      await ctx.value.proxy.write('\x1b[1;5H');
+      // The fragment stage masks the current cursor rectangle, so the
+      // destination cell keeps the pure cursor color rather than being tinted.
+      await ctx.value.page.waitForTimeout(200);
+      await pollForApproximate(ctx.value.page, 8, () => getCellColor(ctx.value, 5, 1), [255, 255, 255, 255], async () => { frameDetails = undefined; }, 700);
+    });
+
+    test('draws a sheared quad for diagonal moves rather than a bounding box', async () => {
+      await ctx.value.page.evaluate(`window.term.options.cursorTrail = 1; window.term.options.cursorTrailColor = '#ff0000';`);
+      await waitForRenderAfter(ctx.value, () => ctx.value.proxy.write('\x1b[1;1H'));
+      await ctx.value.page.waitForTimeout(400);
+      await ctx.value.proxy.write('\x1b[3;5H'); // down-right diagonal
+      // The sheared band must cover the diagonal midpoint...
+      await pollForApproximate(ctx.value.page, 96, () => getCellColor(ctx.value, 3, 2), [128, 0, 0, 255], async () => { frameDetails = undefined; }, 1500);
+      // ...but never the corners of the bounding box: bbox corners are outside
+      // the convex interpolation between the old and new rectangles throughout,
+      // so an axis-aligned ghost/bounding-box implementation would wrongly tint
+      // them.
+      frameDetails = undefined;
+      const topRight = await getCellColor(ctx.value, 5, 1);
+      const bottomLeft = await getCellColor(ctx.value, 1, 3);
+      if (isTrailRed(topRight)) {
+        throw new Error(`bounding-box top-right corner wrongly tinted: ${topRight}`);
+      }
+      if (isTrailRed(bottomLeft)) {
+        throw new Error(`bounding-box bottom-left corner wrongly tinted: ${bottomLeft}`);
+      }
+    });
+
+    test('does not leak trail rendering through synchronized output', async () => {
+      await ctx.value.page.evaluate(`window.term.options.cursorTrail = 1; window.term.options.cursorTrailColor = '#ff0000';`);
+      await waitForRenderAfter(ctx.value, () => ctx.value.proxy.write('\x1b[1;1H'));
+      await ctx.value.page.waitForTimeout(400);
+      await ctx.value.proxy.write('\x1b[?2026h'); // BSU
+      await ctx.value.proxy.write('\x1b[3;5H');
+      // The model keeps animating internally, but DEC 2026 must defer every
+      // painted frame: the cursor is still at its old cell and no trail is
+      // painted at the new position.
+      await ctx.value.page.waitForTimeout(250);
+      frameDetails = undefined;
+      const cursorDuring = await getCellColor(ctx.value, 5, 3);
+      if (cursorDuring[0] > 200 && cursorDuring[1] > 200 && cursorDuring[2] > 200) {
+        throw new Error(`cursor moved during synchronized output: ${cursorDuring}`);
+      }
+      const trailDuring = await getCellColor(ctx.value, 3, 2);
+      if (isTrailRed(trailDuring)) {
+        throw new Error(`trail leaked during synchronized output: ${trailDuring}`);
+      }
+      await ctx.value.proxy.write('\x1b[?2026l'); // ESU
+      // ESU flushes the deferred frame: the cursor is now painted at its new
+      // cell (the trail is masked out of it).
+      await pollForApproximate(ctx.value.page, 8, () => getCellColor(ctx.value, 5, 3), [255, 255, 255, 255], async () => { frameDetails = undefined; }, 700);
     });
   });
+}
+
+/** Whether a sampled cell is dominated by the red trail color. */
+function isTrailRed(color: [number, number, number, number]): boolean {
+  return color[0] > 32 && color[1] < 40 && color[2] < 40;
 }
 
 /**

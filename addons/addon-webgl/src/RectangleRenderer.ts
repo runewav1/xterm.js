@@ -8,7 +8,7 @@ import { IThemeService } from 'browser/services/Services';
 import { Disposable, toDisposable } from 'common/Lifecycle';
 import { Terminal } from '@xterm/xterm';
 import { RectangleRenderModel } from 'browser/renderer/shared/gpu/RectangleRenderModel';
-import { IRectangleRenderer, IRectangleVertices, IRenderModel } from 'browser/renderer/shared/gpu/Types';
+import { IRectangleRenderer, ICursorTrailVertices, IRenderModel } from 'browser/renderer/shared/gpu/Types';
 import { IWebGL2RenderingContext, IWebGLVertexArrayObject } from './Types';
 import { createProgram, PROJECTION_MATRIX } from './WebglUtils';
 import { throwIfFalsy } from 'browser/renderer/shared/RendererUtils';
@@ -18,7 +18,8 @@ const enum VertexAttribLocations {
   POSITION = 0,
   SIZE = 1,
   COLOR = 2,
-  UNIT_QUAD = 3
+  UNIT_QUAD = 3,
+  TRAIL_POSITION = 0
 }
 
 const vertexShaderSource = `#version 300 es
@@ -48,6 +49,40 @@ void main() {
   outColor = v_color;
 }`;
 
+// The cursor trail draws a genuine four-corner quad; positions are normalized
+// against the device canvas and passed straight through the projection. The
+// fragment stage masks the current cursor rectangle and outputs premultiplied
+// alpha, matching kitty's built-in trail shader.
+const trailVertexShaderSource = `#version 300 es
+layout (location = ${VertexAttribLocations.TRAIL_POSITION}) in vec2 a_position;
+
+uniform mat4 u_projection;
+
+out vec2 v_position;
+
+void main() {
+  v_position = a_position;
+  gl_Position = u_projection * vec4(a_position, 0.0, 1.0);
+}`;
+
+const trailFragmentShaderSource = `#version 300 es
+precision highp float;
+
+in vec2 v_position;
+
+uniform vec4 u_cursor_rect;
+uniform vec3 u_color;
+uniform float u_opacity;
+
+out vec4 outColor;
+
+void main() {
+  float insideX = step(u_cursor_rect.x, v_position.x) * step(v_position.x, u_cursor_rect.z);
+  float insideY = step(u_cursor_rect.y, v_position.y) * step(v_position.y, u_cursor_rect.w);
+  float opacity = u_opacity * (1.0 - insideX * insideY);
+  outColor = vec4(u_color * opacity, opacity);
+}`;
+
 const enum Constants {
   BYTES_PER_RECTANGLE = 8 * 4,
   FLOATS_PER_RECTANGLE = 8
@@ -60,17 +95,26 @@ export class RectangleRenderer extends Disposable implements IRectangleRenderer 
   private readonly _projectionLocation: WebGLUniformLocation;
   private readonly _model: RectangleRenderModel;
 
+  // Trail resources are created on first use so an unused trail costs nothing.
+  private _trailProgram: WebGLProgram | undefined;
+  private _trailVertexArrayObject: IWebGLVertexArrayObject | undefined;
+  private _trailBuffer: WebGLBuffer | undefined;
+  private _trailProjectionLocation: WebGLUniformLocation | undefined;
+  private _trailCursorRectLocation: WebGLUniformLocation | undefined;
+  private _trailColorLocation: WebGLUniformLocation | undefined;
+  private _trailOpacityLocation: WebGLUniformLocation | undefined;
+
   constructor(
     terminal: Terminal,
     private readonly _gl: IWebGL2RenderingContext,
     dimensions: IRenderDimensions,
     themeService: IThemeService,
-    logService: ILogService
+    private readonly _logService: ILogService
   ) {
     super();
     const gl = this._gl;
 
-    this._program = throwIfFalsy(createProgram(gl, vertexShaderSource, fragmentShaderSource, logService));
+    this._program = throwIfFalsy(createProgram(gl, vertexShaderSource, fragmentShaderSource, this._logService));
     this._register(toDisposable(() => gl.deleteProgram(this._program)));
 
     this._projectionLocation = throwIfFalsy(gl.getUniformLocation(this._program, 'u_projection'));
@@ -117,16 +161,46 @@ export class RectangleRenderer extends Disposable implements IRectangleRenderer 
     this._renderVertices(this._model.cursor);
   }
 
-  public renderCursorSmear(vertices: IRectangleVertices): void {
-    if (vertices.count === 0) {
+  public renderCursorTrail(vertices: ICursorTrailVertices): void {
+    if (!vertices.visible || vertices.opacity <= 0) {
       return;
     }
-    // The smear uses straight-alpha colors and is drawn before glyphs, so it
-    // cannot rely on the glyph pass having enabled blending itself.
+    this._ensureTrailResources();
     const gl = this._gl;
+    gl.useProgram(this._trailProgram!);
+    gl.bindVertexArray(this._trailVertexArrayObject!);
+    gl.uniformMatrix4fv(this._trailProjectionLocation!, false, PROJECTION_MATRIX);
+    gl.uniform4f(this._trailCursorRectLocation!, vertices.cursorRect[0], vertices.cursorRect[1], vertices.cursorRect[2], vertices.cursorRect[3]);
+    gl.uniform3f(this._trailColorLocation!, vertices.color[0], vertices.color[1], vertices.color[2]);
+    gl.uniform1f(this._trailOpacityLocation!, vertices.opacity);
+    // Premultiplied source over destination, matching kitty.
     gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    this._renderVertices(vertices);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._trailBuffer!);
+    gl.bufferData(gl.ARRAY_BUFFER, vertices.positions, gl.DYNAMIC_DRAW);
+    gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+  }
+
+  private _ensureTrailResources(): void {
+    if (this._trailProgram) {
+      return;
+    }
+    const gl = this._gl;
+    const program = this._trailProgram = throwIfFalsy(createProgram(gl, trailVertexShaderSource, trailFragmentShaderSource, this._logService));
+    this._register(toDisposable(() => gl.deleteProgram(program)));
+    this._trailProjectionLocation = throwIfFalsy(gl.getUniformLocation(program, 'u_projection'));
+    this._trailCursorRectLocation = throwIfFalsy(gl.getUniformLocation(program, 'u_cursor_rect'));
+    this._trailColorLocation = throwIfFalsy(gl.getUniformLocation(program, 'u_color'));
+    this._trailOpacityLocation = throwIfFalsy(gl.getUniformLocation(program, 'u_opacity'));
+
+    const vao = this._trailVertexArrayObject = gl.createVertexArray();
+    this._register(toDisposable(() => gl.deleteVertexArray(vao)));
+    gl.bindVertexArray(vao);
+    const buffer = this._trailBuffer = throwIfFalsy(gl.createBuffer());
+    this._register(toDisposable(() => gl.deleteBuffer(buffer)));
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.enableVertexAttribArray(VertexAttribLocations.TRAIL_POSITION);
+    gl.vertexAttribPointer(VertexAttribLocations.TRAIL_POSITION, 2, gl.FLOAT, false, 0, 0);
   }
 
   private _renderVertices(vertices: { attributes: Float32Array, count: number }): void {

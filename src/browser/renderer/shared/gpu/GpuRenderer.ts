@@ -7,7 +7,7 @@ import { ITerminal } from '../../../Types';
 import { CellColorResolver } from './CellColorResolver';
 import { acquireTextureAtlas, releaseTextureAtlas } from './CharAtlasCache';
 import { CursorBlinkStateManager } from './CursorBlinkStateManager';
-import { CursorSmearModel } from './CursorSmearModel';
+import { CursorTrailModel } from './CursorTrailModel';
 import { observeDevicePixelDimensions } from './DevicePixelObserver';
 import { IRenderDimensions, IRenderer, IRequestRedrawEvent } from '../Types';
 import { ICharSizeService, ICharacterJoinerService, ICoreBrowserService, IThemeService } from '../../../services/Services';
@@ -19,7 +19,7 @@ import { TextBlinkStateManager } from '../TextBlinkStateManager';
 import { ICoreService, IDecorationService, ILogService, IOptionsService } from '../../../../common/services/Services';
 import { Terminal } from '@xterm/xterm';
 import { COMBINED_CHAR_BIT_MASK, RenderModel, RenderModelConstants } from './RenderModel';
-import { IGpuBackend, IGlyphRenderer, IRectangleRenderer, ITextureAtlas } from './Types';
+import { IGpuBackend, IGlyphRenderer, IRectangleRenderer, ITextureAtlas, ICursorRenderModel } from './Types';
 import { LinkRenderLayer } from './renderLayer/LinkRenderLayer';
 import { IRenderLayer } from './renderLayer/Types';
 import { Emitter, EventUtils } from '../../../../common/Event';
@@ -41,7 +41,8 @@ export class GpuRenderer extends Disposable implements IRenderer {
   private _observerDisposable = this._register(new MutableDisposable());
 
   private _model: RenderModel = new RenderModel();
-  private _cursorSmear!: CursorSmearModel;
+  private _cursorTrail!: CursorTrailModel;
+  private _trailCursor: ICursorRenderModel | undefined;
   private _lastViewportYdisp: number = -1;
   private _isViewportVisible: boolean = true;
   private _rowHasBlinkingCells: boolean[] = [];
@@ -111,13 +112,14 @@ export class GpuRenderer extends Disposable implements IRenderer {
       this.dimensions = createRenderDimensions();
       this._devicePixelRatio = this._coreBrowserService.dpr;
       this._updateDimensions();
-      this._cursorSmear = this._register(new CursorSmearModel(
+      this._cursorTrail = this._register(new CursorTrailModel(
         this.dimensions,
         this._coreBrowserService,
+        this._coreService,
         this._themeService,
         () => this._requestRedrawCursor()
       ));
-      this._cursorSmear.setOptions(this._optionsService.rawOptions.cursorSmear);
+      this._cursorTrail.setOptions(this._optionsService.rawOptions);
       this._updateCursorBlink();
       this._register(_optionsService.onOptionChange(() => this._handleOptionsChanged()));
       this._textBlinkStateManager = this._register(new TextBlinkStateManager(
@@ -182,7 +184,7 @@ export class GpuRenderer extends Disposable implements IRenderer {
   public handleResize(cols: number, rows: number): void {
     // Update character and canvas dimensions
     this._updateDimensions();
-    this._cursorSmear.setDimensions(this.dimensions);
+    this._cursorTrail.setDimensions(this.dimensions);
 
     this._model.resize(this._terminal.cols, this._terminal.rows);
     this._resetBlinkingRowState();
@@ -226,7 +228,9 @@ export class GpuRenderer extends Disposable implements IRenderer {
       l.handleBlur(this._terminal);
     }
     this._cursorBlinkStateManager.value?.pause();
-    this._cursorSmear.reset();
+    // The trail is intentionally not reset on blur: kitty keeps animating the
+    // active pane while the OS window is unfocused. Opacity fades on its own
+    // when the inactive cursor style has no rectangle.
     // Request a redraw for active/inactive selection background
     this._requestRedrawViewport();
   }
@@ -244,7 +248,9 @@ export class GpuRenderer extends Disposable implements IRenderer {
     this._textBlinkStateManager.setViewportVisible(isVisible);
     this._isViewportVisible = isVisible;
     if (!isVisible) {
-      this._cursorSmear.reset();
+      // Drop in-flight state while the tab is hidden so returning to it does not
+      // replay a large elapsed-time jump, and cancel the animation frame.
+      this._cursorTrail.reset();
     }
   }
 
@@ -267,7 +273,7 @@ export class GpuRenderer extends Disposable implements IRenderer {
     this._updateDimensions();
     this._refreshCharAtlas();
     this._updateCursorBlink();
-    this._cursorSmear.setOptions(this._optionsService.rawOptions.cursorSmear);
+    this._cursorTrail.setOptions(this._optionsService.rawOptions);
   }
 
   /**
@@ -350,7 +356,7 @@ export class GpuRenderer extends Disposable implements IRenderer {
     this._resetBlinkingRowState();
     this._textBlinkStateManager.setNeedsBlinkInViewport(false);
 
-    this._cursorSmear.reset();
+    this._cursorTrail.reset();
     this._cursorBlinkStateManager.value?.restartBlinkAnimation();
     this._updateCursorBlink();
   }
@@ -413,9 +419,9 @@ export class GpuRenderer extends Disposable implements IRenderer {
     try {
       this._backend.beginRender(this.dimensions);
       this._rectangleRenderer.value.renderBackgrounds();
-      // Smear is drawn before glyphs and the live cursor so text and the cursor
-      // stay legible on top of the trail.
-      this._rectangleRenderer.value.renderCursorSmear(this._cursorSmear.vertices);
+      // The trail is drawn before glyphs and the live cursor so text and the
+      // cursor stay legible on top of it.
+      this._rectangleRenderer.value.renderCursorTrail(this._cursorTrail.vertices);
       this._glyphRenderer.value.render(this._model);
       if (!this._cursorBlinkStateManager.value || this._cursorBlinkStateManager.value.isCursorVisible) {
         this._rectangleRenderer.value.renderCursor();
@@ -477,24 +483,18 @@ export class GpuRenderer extends Disposable implements IRenderer {
       !this._coreService.isCursorHidden &&
       (!this._cursorBlinkStateManager.value || this._cursorBlinkStateManager.value.isCursorVisible);
     // A viewport scroll moves the cursor's viewport-relative position without
-    // the cursor itself moving, so drop any in-flight smear instead of
+    // the cursor itself moving, so drop any in-flight trail instead of
     // animating it across the scroll.
     if (terminal.buffer.ydisp !== this._lastViewportYdisp) {
       this._lastViewportYdisp = terminal.buffer.ydisp;
-      this._cursorSmear.reset();
+      this._cursorTrail.reset();
     }
     // Compute the cursor model independently of the dirty row range so that an
     // unrelated refresh (e.g. scrolled content) preserves bar/underline/outline
-    // cursors instead of clearing them and never rebuilding them.
+    // cursors instead of clearing them and never rebuilding them. This also
+    // derives the trail geometry (blink-independent) when the trail is enabled.
     this._updateCursorModel();
-    // The smear hard clears while the cursor is hidden, blinking off, blurred
-    // or scrolled out of the viewport, so no residual trail remains. Gating on
-    // visibility here (not just on the reset above) also stops later cursor
-    // updates from scheduling smear frames while the terminal is hidden.
-    const smearCursor = this._coreBrowserService.isFocused && this._isViewportVisible
-      ? this._model.cursor
-      : undefined;
-    this._cursorSmear.setCursor(smearCursor);
+    this._cursorTrail.setCursor(this._trailCursor);
     let backgroundUpdated = false;
 
     for (y = start; y <= end; y++) {
@@ -670,13 +670,16 @@ export class GpuRenderer extends Disposable implements IRenderer {
    * unrelated refresh (e.g. scrolled content) preserves bar/underline/outline
    * cursors. The block cursor does not need this model as it is baked into the
    * cell's background color while the cursor row is refreshed.
+   *
+   * This also derives the trail's cursor geometry in the same pass (when the
+   * trail is enabled) so the cell is loaded once. The trail snapshot ignores
+   * blinking so a blink never resets trail motion; it is suppressed while the
+   * viewport is hidden or the effective inactive style has no rectangle.
    */
   private _updateCursorModel(): void {
     this._model.cursor = undefined;
+    this._trailCursor = undefined;
     if (!this._coreService.isCursorInitialized || this._coreService.isCursorHidden) {
-      return;
-    }
-    if (this._cursorBlinkStateManager.value && !this._cursorBlinkStateManager.value.isCursorVisible) {
       return;
     }
     const terminal = this._core;
@@ -695,14 +698,31 @@ export class GpuRenderer extends Disposable implements IRenderer {
     const cell = this._workCell;
     bufferLine.loadCell(cursorX, cell);
     const cursorStyle = this._coreService.decPrivateModes.cursorStyle ?? terminal.options.cursorStyle ?? 'block';
-    this._model.cursor = {
+    const style = this._coreBrowserService.isFocused ? cursorStyle : terminal.options.cursorInactiveStyle;
+    const cursorVisible = !this._cursorBlinkStateManager.value || this._cursorBlinkStateManager.value.isCursorVisible;
+    // Gate the trail work before allocating anything: an unused trail must stay
+    // free even while the cursor is drawn.
+    const trailWanted = this._cursorTrail.enabled && this._isViewportVisible && style !== 'none';
+    if (!cursorVisible && !trailWanted) {
+      return;
+    }
+    const snapshot: ICursorRenderModel = {
       x: cursorX,
       y: viewportRelativeCursorY,
       width: cell.getWidth(),
-      style: this._coreBrowserService.isFocused ? cursorStyle : terminal.options.cursorInactiveStyle,
+      style,
       cursorWidth: terminal.options.cursorWidth,
       dpr: this._devicePixelRatio
     };
+    if (cursorVisible) {
+      this._model.cursor = snapshot;
+    }
+    if (trailWanted) {
+      this._trailCursor = snapshot;
+    }
+    if (!cursorVisible) {
+      this._model.cursor = undefined;
+    }
   }
 
   private _nullModelCell(x: number, y: number, cellIndex: number, bg: number, fg: number, ext: number): void {

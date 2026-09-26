@@ -35,9 +35,15 @@ interface IDrawRecord {
   instanceCount: number;
 }
 
-function createFakeGl(): { gl: IWebGL2RenderingContext, bufferDatas: IBufferDataRecord[], drawInstances: IDrawRecord[] } {
+interface IDrawArraysRecord {
+  mode: number;
+  count: number;
+}
+
+function createFakeGl(): { gl: IWebGL2RenderingContext, bufferDatas: IBufferDataRecord[], drawInstances: IDrawRecord[], drawArrays: IDrawArraysRecord[] } {
   const bufferDatas: IBufferDataRecord[] = [];
   const drawInstances: IDrawRecord[] = [];
+  const drawArrays: IDrawArraysRecord[] = [];
   const gl = {
     VERTEX_SHADER: 0x8B31,
     FRAGMENT_SHADER: 0x8B30,
@@ -49,10 +55,12 @@ function createFakeGl(): { gl: IWebGL2RenderingContext, bufferDatas: IBufferData
     STATIC_DRAW: 0x88E4,
     DYNAMIC_DRAW: 0x88E8,
     TRIANGLE_STRIP: 0x5,
+    TRIANGLE_FAN: 0x6,
     UNSIGNED_BYTE: 0x1401,
     BLEND: 0x0BE2,
     SRC_ALPHA: 0x0302,
     ONE_MINUS_SRC_ALPHA: 0x0303,
+    ONE: 0x0001,
     enable: () => {},
     blendFunc: () => {},
     createProgram: () => ({}),
@@ -82,11 +90,17 @@ function createFakeGl(): { gl: IWebGL2RenderingContext, bufferDatas: IBufferData
     vertexAttribDivisor: () => {},
     useProgram: () => {},
     uniformMatrix4fv: () => {},
+    uniform4f: () => {},
+    uniform3f: () => {},
+    uniform1f: () => {},
     drawElementsInstanced: (_mode: number, count: number, _type: number, _offset: number, instanceCount: number) => {
       drawInstances.push({ count, instanceCount });
+    },
+    drawArrays: (mode: number, _first: number, count: number) => {
+      drawArrays.push({ mode, count });
     }
   } as unknown as IWebGL2RenderingContext;
-  return { gl, bufferDatas, drawInstances };
+  return { gl, bufferDatas, drawInstances, drawArrays };
 }
 
 describe('RectangleRenderer', () => {
@@ -144,20 +158,37 @@ describe('RectangleRenderer', () => {
     assert.strictEqual(glEnv.drawInstances.length, 0);
   });
 
-  it('draws smear vertices and enables alpha blending', () => {
+  it('draws a four-corner trail quad with premultiplied blending', () => {
     const calls: string[] = [];
     (glEnv.gl as any).enable = () => calls.push('enable');
-    (glEnv.gl as any).blendFunc = () => calls.push('blendFunc');
-    const attributes = new Float32Array(8);
-    renderer.renderCursorSmear({ attributes, count: 1, version: 0 });
-    assert.deepEqual(calls, ['enable', 'blendFunc']);
-    assert.strictEqual(glEnv.drawInstances.length, 1);
-    assert.strictEqual(glEnv.drawInstances[0].instanceCount, 1);
-    assert.strictEqual((glEnv.bufferDatas[glEnv.bufferDatas.length - 1].data as Float32Array).byteLength, 8 * Float32Array.BYTES_PER_ELEMENT);
+    (glEnv.gl as any).blendFunc = (src: number, dst: number) => calls.push(`blendFunc:${src}:${dst}`);
+    const trail = {
+      positions: new Float32Array(8),
+      cursorRect: new Float32Array(4),
+      color: new Float32Array(3),
+      opacity: 0.5,
+      visible: true,
+      version: 0
+    };
+    renderer.renderCursorTrail(trail);
+    assert.deepEqual(calls, ['enable', 'blendFunc:1:771']);
+    assert.strictEqual(glEnv.drawArrays.length, 1);
+    assert.strictEqual(glEnv.drawArrays[0].mode, 0x6);
+    assert.strictEqual(glEnv.drawArrays[0].count, 4);
+    const upload = glEnv.bufferDatas[glEnv.bufferDatas.length - 1];
+    assert.ok(upload.data instanceof Float32Array);
+    assert.strictEqual(upload.data.byteLength, 8 * Float32Array.BYTES_PER_ELEMENT);
   });
 
-  it('skips smear rendering when there are no vertices', () => {
-    renderer.renderCursorSmear({ attributes: new Float32Array(0), count: 0, version: 0 });
-    assert.strictEqual(glEnv.drawInstances.length, 0);
+  it('skips trail rendering when the trail is invisible', () => {
+    renderer.renderCursorTrail({
+      positions: new Float32Array(8),
+      cursorRect: new Float32Array(4),
+      color: new Float32Array(3),
+      opacity: 0,
+      visible: false,
+      version: 0
+    });
+    assert.strictEqual(glEnv.drawArrays.length, 0);
   });
 });

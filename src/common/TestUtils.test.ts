@@ -110,6 +110,7 @@ export class MockCoreService implements ICoreService {
   public serviceBrand: any;
   public isCursorInitialized: boolean = true;
   public isCursorHidden: boolean = false;
+  public cursorPositionChangedAt: number = 0;
   public isFocused: boolean = false;
   public modes: IModes = {
     insertMode: false

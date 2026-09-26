@@ -75,6 +75,40 @@ describe('InputHandler', () => {
     inputHandler = new TestInputHandler(bufferService, new MockCharsetService(), coreService, new MockLogService(), optionsService, oscLinkService, new MockMouseStateService(), new MockUnicodeService());
   });
 
+  describe('cursor trail parse-time position tracking', () => {
+    it('marks explicit absolute positioning controls', async () => {
+      // CUP / HVP
+      coreService.cursorPositionChangedAt = -1;
+      await inputHandler.parseP('\x1b[3;4H');
+      assert.isAbove(coreService.cursorPositionChangedAt, 0);
+      coreService.cursorPositionChangedAt = -1;
+      await inputHandler.parseP('\x1b[3;4f');
+      assert.isAbove(coreService.cursorPositionChangedAt, 0);
+      // VPA
+      coreService.cursorPositionChangedAt = -1;
+      await inputHandler.parseP('\x1b[5d');
+      assert.isAbove(coreService.cursorPositionChangedAt, 0);
+    });
+
+    it('does not mark printed text, relative movement, CHA/HPA or DECRC', async () => {
+      coreService.cursorPositionChangedAt = -1;
+      await inputHandler.parseP('hello world');
+      assert.strictEqual(coreService.cursorPositionChangedAt, -1, 'print advances the cursor without marking');
+      await inputHandler.parseP('\r\n\t\b');
+      assert.strictEqual(coreService.cursorPositionChangedAt, -1, 'C0 controls do not mark');
+      await inputHandler.parseP('\x1b[5C\x1b[3D\x1b[2A\x1b[1B\x1b[2E\x1b[1F');
+      assert.strictEqual(coreService.cursorPositionChangedAt, -1, 'relative movement does not mark');
+      // kitty's screen_cursor_to_column (CHA/HPA) does not touch
+      // position_changed_by_client_at.
+      await inputHandler.parseP('\x1b[5G\x1b[2`');
+      assert.strictEqual(coreService.cursorPositionChangedAt, -1, 'CHA/HPA do not mark');
+      // DECRC only marks in kitty when there is no valid savepoint, which
+      // xterm.js cannot distinguish, so it is intentionally not marked.
+      await inputHandler.parseP('\x1b7\x1b8');
+      assert.strictEqual(coreService.cursorPositionChangedAt, -1, 'DECRC does not mark');
+    });
+  });
+
   describe('SL/SR/DECIC/DECDC', () => {
     beforeEach(() => {
       bufferService.resize(5, 5);

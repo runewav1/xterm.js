@@ -12,7 +12,7 @@ import { DisposableStore } from '../../../../common/Lifecycle';
 import { css } from '../../../../common/Color';
 import type { ICoreBrowserService } from '../../../services/Services';
 import type { IRenderDimensions } from '../Types';
-import type { IGpuBackend, IGlyphRenderer, IRectangleRenderer, IRenderModel } from './Types';
+import type { IGpuBackend, IGlyphRenderer, IRectangleRenderer, IRenderModel, ICursorTrailVertices } from './Types';
 import { GpuRenderer } from './GpuRenderer';
 
 class FakeGlyphRenderer implements IGlyphRenderer {
@@ -40,11 +40,11 @@ class FakeRectangleRenderer implements IRectangleRenderer {
   public updateBackgrounds(_model: IRenderModel, startRow: number, endRow: number): void {
     this.updateBackgroundsCalls.push({ startRow, endRow });
   }
-  public smearCounts: number[] = [];
+  public trailFrames: ICursorTrailVertices[] = [];
   public updateCursor(): void {}
   public renderBackgrounds(): void {}
   public renderCursor(): void {}
-  public renderCursorSmear(vertices: { count: number }): void { this.smearCounts.push(vertices.count); }
+  public renderCursorTrail(vertices: ICursorTrailVertices): void { this.trailFrames.push(vertices); }
   public handleResize(): void {}
   public setDimensions(): void {}
   public dispose(): void {}
@@ -303,71 +303,73 @@ describe('GpuRenderer', () => {
     assert.deepStrictEqual([canvas.width, canvas.height], [159, 47]);
   });
 
-  it('draws smear vertices during renderRows, including the empty disabled case', () => {
+  it('draws trail vertices during renderRows, including the empty disabled case', () => {
     (renderer as any)._isAttached = true;
     renderer.renderRows(0, terminal.rows - 1);
-    assert.deepEqual(rectangleRenderer.smearCounts, [0]);
+    assert.strictEqual(rectangleRenderer.trailFrames.length, 1);
+    assert.strictEqual(rectangleRenderer.trailFrames[0].visible, false);
   });
 
-  it('resets the smear model on clear, blur, resize, scroll and hidden cursor', () => {
-    const smear = (renderer as any)._cursorSmear;
-    const seed = (): void => {
-      smear.setCursor({ x: 0, y: 0, width: 1, style: 'bar', cursorWidth: 1, dpr: 1 });
-      smear.setCursor({ x: 1, y: 0, width: 1, style: 'bar', cursorWidth: 1, dpr: 1 });
-      assert.ok((smear as any)._head, 'smear should track a cursor');
-    };
-
-    smear.setOptions({ enabled: true });
-    seed();
-    renderer.clear();
-    assert.ok(!(smear as any)._head);
-
-    seed();
-    renderer.handleBlur();
-    assert.ok(!(smear as any)._head);
-
-    seed();
-    renderer.handleViewportVisibilityChange(false);
-    assert.ok(!(smear as any)._head);
-
-    seed();
-    (terminal as any)._core.buffer.ydisp = 5;
-    (renderer as any)._updateModel(0, terminal.rows - 1);
-    // Scrolling drops the in-flight trail; the cursor is then re-established as
-    // a fresh reference point rather than continuing to smear.
-    assert.strictEqual((smear as any)._frame, undefined);
-    assert.strictEqual((smear as any)._source, (smear as any)._head);
-
-    seed();
-    renderer.handleResize(terminal.cols, terminal.rows);
-    assert.ok(!(smear as any)._head);
-
-    // Focusing again lets a new trail establish without a phantom.
-    coreBrowserState.isFocused = false;
-    seed();
-    (renderer as any)._updateModel(0, terminal.rows - 1);
-    assert.ok(!(smear as any)._head, 'blurred cursor must not smear');
-  });
-
-  it('stays cleared while the viewport is hidden and re-baselines on return', () => {
-    const smear = (renderer as any)._cursorSmear;
-    // The mock char size is zero, so give the model real device dimensions.
+  it('resets the trail on clear, viewport hide, scroll and resize but not on blur', () => {
+    const trail = (renderer as any)._cursorTrail;
     renderer.dimensions.device.cell.width = 10;
     renderer.dimensions.device.cell.height = 20;
     renderer.dimensions.device.canvas.width = 20;
     renderer.dimensions.device.canvas.height = 40;
-    smear.setOptions({ enabled: true, duration: 1000 });
-    renderer.handleViewportVisibilityChange(false);
-    smear.setCursor({ x: 0, y: 0, width: 1, style: 'bar', cursorWidth: 1, dpr: 1 });
-    smear.setCursor({ x: 1, y: 0, width: 1, style: 'bar', cursorWidth: 1, dpr: 1 });
-    assert.isAbove(smear.vertices.count, 0);
+    coreService.cursorPositionChangedAt = -100000;
+    trail.setOptions({ cursorTrail: 20 });
+    const seed = (): void => {
+      (trail as any)._cursor = { x: 0, y: 0, width: 1, style: 'block', cursorWidth: 1, dpr: 1 };
+      (trail as any)._advance(0);
+      (trail as any)._cursor = { x: 1, y: 0, width: 1, style: 'block', cursorWidth: 1, dpr: 1 };
+      (trail as any)._advance(100);
+      assert.ok((trail as any)._hasGeometry, 'trail should track a cursor');
+    };
 
+    seed();
+    renderer.clear();
+    assert.ok(!(trail as any)._hasGeometry);
+
+    seed();
+    renderer.handleBlur();
+    // kitty keeps animating the active pane while the OS window is unfocused.
+    assert.ok((trail as any)._hasGeometry, 'blur must not reset trail motion');
+
+    seed();
+    renderer.handleViewportVisibilityChange(false);
+    assert.ok(!(trail as any)._hasGeometry);
+
+    renderer.handleViewportVisibilityChange(true);
+    seed();
+    (terminal as any)._core.buffer.ydisp = 5;
     (renderer as any)._updateModel(0, terminal.rows - 1);
-    assert.ok(!(smear as any)._head, 'hidden viewport must gate smear updates');
+    assert.ok(!(trail as any)._hasGeometry, 'scrolling drops the in-flight trail');
+
+    (terminal as any)._core.buffer.ydisp = 0;
+    (renderer as any)._updateModel(0, terminal.rows - 1);
+    seed();
+    renderer.handleResize(terminal.cols, terminal.rows);
+    assert.ok(!(trail as any)._hasGeometry);
+  });
+
+  it('gates retargeting while the viewport is hidden and re-establishes on return', () => {
+    renderer.dimensions.device.cell.width = 10;
+    renderer.dimensions.device.cell.height = 20;
+    renderer.dimensions.device.canvas.width = 20;
+    renderer.dimensions.device.canvas.height = 40;
+    coreService.cursorPositionChangedAt = -100000;
+    const trail = (renderer as any)._cursorTrail;
+    trail.setOptions({ cursorTrail: 1000 });
 
     renderer.handleViewportVisibilityChange(true);
     (renderer as any)._updateModel(0, terminal.rows - 1);
-    assert.ok((smear as any)._head, 'regaining visibility re-establishes the baseline');
-    assert.strictEqual((smear as any)._source, (smear as any)._head);
+    assert.ok((renderer as any)._trailCursor, 'visible viewport exposes cursor geometry');
+    (trail as any)._advance(0);
+    assert.ok((trail as any)._hasGeometry, 'trail establishes geometry');
+
+    renderer.handleViewportVisibilityChange(false);
+    assert.ok(!(trail as any)._hasGeometry, 'hidden viewport hard clears the trail');
+    (renderer as any)._updateModel(0, terminal.rows - 1);
+    assert.ok(!(renderer as any)._trailCursor, 'hidden viewport gates retargeting');
   });
 });

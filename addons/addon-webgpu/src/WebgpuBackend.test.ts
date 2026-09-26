@@ -1068,18 +1068,32 @@ describe('WebgpuBackend', () => {
     assert.strictEqual(missing.state.deviceDestroyed, 0);
   });
 
-  it('draws cursor smear geometry into a dedicated buffer on every frame', () => {
-    const attributes = new Float32Array([0.1, 0.2, 0.3, 0.4, 1, 0, 0, 0.5]);
-    const vertices = { attributes, count: 1, version: 0 };
+  it('draws the cursor trail as a six-vertex quad in a dedicated buffer on every frame', () => {
+    const positions = new Float32Array([0.1, 0.2, 0.3, 0.2, 0.3, 0.4, 0.1, 0.4]);
+    const vertices = {
+      positions,
+      cursorRect: new Float32Array([0.1, 0.2, 0.3, 0.4]),
+      color: new Float32Array([1, 0.5, 0]),
+      opacity: 0.5,
+      visible: true,
+      version: 0
+    };
     backend.beginRender(dimensions);
-    rectangleRenderer.renderCursorSmear(vertices);
-    rectangleRenderer.renderCursorSmear(vertices);
+    rectangleRenderer.renderCursorTrail(vertices);
+    rectangleRenderer.renderCursorTrail(vertices);
     backend.endRender();
-    const writes = gpu.writes.filter(e => e.buffer.label === 'xterm cursor smear');
-    assert.strictEqual(writes.length, 2, 'smear uploads every frame regardless of version');
-    const draws = gpu.draws.filter(e => e.buffer.label === 'xterm cursor smear');
+    const writes = gpu.writes.filter(e => e.buffer.label === 'xterm cursor trail');
+    assert.strictEqual(writes.length, 2, 'trail uploads every frame regardless of version');
+    const draws = gpu.draws.filter(e => e.buffer.label === 'xterm cursor trail');
     assert.strictEqual(draws.length, 2);
-    assert.deepEqual(Array.from(draws[0].submitted!).slice(0, 8), Array.from(attributes));
+    assert.strictEqual(draws[0].vertices, 6);
+    // Two triangles (0,1,2) and (0,2,3) reproduce kitty's GL_TRIANGLE_FAN fill.
+    const expected = [0.1, 0.2, 0.3, 0.2, 0.3, 0.4, 0.1, 0.2, 0.3, 0.4, 0.1, 0.4];
+    const submitted = draws[0].submitted!;
+    assert.strictEqual(submitted.length, expected.length);
+    for (let i = 0; i < expected.length; i++) {
+      assert.closeTo(submitted[i], expected[i], 1e-5);
+    }
   });
 
   it('generates top-left geometry, explicit-LOD page switches and premultiplied rectangles', () => {

@@ -4,7 +4,7 @@
  */
 
 import type { IDecoration, IDecorationOptions, ILinkHandler, ILogger, IWindowsPty, IOverviewRulerOptions } from '@xterm/xterm';
-import { CoreMouseEncoding, CoreMouseEventType, CursorInactiveStyle, CursorStyle, ICharset, IColor, ICoreMouseEvent, ICoreMouseProtocol, ICursorSmearOptions, IDecPrivateModes, IDisposable, IKittyKeyboardState, IModes, IOscLinkData, IWindowOptions } from '../Types';
+import { CoreMouseEncoding, CoreMouseEventType, CursorInactiveStyle, CursorStyle, CursorTrailDecay, CursorTrailStartThreshold, ICharset, IColor, ICoreMouseEvent, ICoreMouseProtocol, IDecPrivateModes, IDisposable, IKittyKeyboardState, IModes, IOscLinkData, IWindowOptions } from '../Types';
 import { IAttributeData, IBuffer, IBufferSet } from '../buffer/Types';
 import { createDecorator, IServiceIdentifier } from './ServiceRegistry';
 import type { Emitter, IEvent } from '../Event';
@@ -66,6 +66,17 @@ export interface ICoreService {
    */
   isCursorInitialized: boolean;
   isCursorHidden: boolean;
+
+  /**
+   * Monotonic timestamp (in milliseconds, see {@link monotonicNow}) of the last
+   * time the client explicitly positioned the cursor with an absolute control
+   * sequence (CUP/HVP/VPA, and DECRC when restoring). The cursor trail uses this
+   * to debounce trails during rapid UI updates, mirroring kitty's
+   * `cursor->position_changed_by_client_at`. It is set while parsing, before any
+   * render observes the new position, and is never updated by ordinary printed
+   * text or by relative cursor movement.
+   */
+  cursorPositionChangedAt: number;
 
   readonly modes: IModes;
   readonly decPrivateModes: IDecPrivateModes;
@@ -211,7 +222,17 @@ export interface ITerminalOptions {
   cursorStyle?: CursorStyle;
   cursorWidth?: number;
   cursorInactiveStyle?: CursorInactiveStyle;
-  cursorSmear?: ICursorSmearOptions;
+  /**
+   * Milliseconds the cursor must remain stationary before the cursor trail
+   * follows it. 0 disables the trail. Mirrors kitty's `cursor_trail`.
+   */
+  cursorTrail?: number;
+  /** Decay times in seconds, `[fast, slow]`. Defaults to `[0.1, 0.4]`. */
+  cursorTrailDecay?: CursorTrailDecay;
+  /** Start threshold in cells, a single value or `[x, y]`. Defaults to 2. */
+  cursorTrailStartThreshold?: CursorTrailStartThreshold;
+  /** Trail color override, or `'none'` to use the theme cursor color. */
+  cursorTrailColor?: string;
   disableStdin?: boolean;
   documentOverride?: any | null;
   drawBoldTextInBrightColors?: boolean;

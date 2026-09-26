@@ -51,7 +51,7 @@ export interface IGlyphRenderer extends IDisposable {
 export interface IRectangleRenderer extends IDisposable {
   renderBackgrounds(): void;
   renderCursor(): void;
-  renderCursorSmear(vertices: IRectangleVertices): void;
+  renderCursorTrail(vertices: ICursorTrailVertices): void;
   handleResize(): void;
   setDimensions(dimensions: IRenderDimensions): void;
   updateBackgrounds(model: IRenderModel, startRow: number, endRow: number): void;
@@ -61,12 +61,40 @@ export interface IRectangleRenderer extends IDisposable {
 /**
  * A packed vertex stream of instanced rectangles, laid out as
  * `[x, y, width, height, r, g, b, a]` per rectangle with positions normalized
- * against the device canvas. Shared by the background, cursor and cursor smear
- * streams so every backend can draw them with one pipeline.
+ * against the device canvas. Shared by the background and cursor streams so
+ * every backend can draw them with one pipeline.
  */
 export interface IRectangleVertices {
   attributes: Float32Array;
   count: number;
+  version: number;
+}
+
+/**
+ * Geometry for the cursor trail. Unlike {@link IRectangleVertices} this is a
+ * genuine four-corner quad that may be arbitrarily sheared or concave as the
+ * cursor jumps diagonally, matching kitty's built-in trail.
+ */
+export interface ICursorTrailVertices {
+  /**
+   * The four quad corners as `[x0, y0, x1, y1, x2, y2, x3, y3]`, normalized
+   * against the device canvas (top-left origin). Corner order is
+   * `0=(right,top), 1=(right,bottom), 2=(left,bottom), 3=(left,top)`.
+   */
+  positions: Float32Array;
+  /**
+   * The current (target) cursor rectangle as `[left, top, right, bottom]`,
+   * normalized against the device canvas. The fragment shader masks the trail
+   * inside this rectangle so the real cursor stays crisp.
+   */
+  cursorRect: Float32Array;
+  /** Trail color as linear `[r, g, b]` in 0..1. */
+  color: Float32Array;
+  /** Trail opacity in 0..1. */
+  opacity: number;
+  /** Whether the trail should be drawn this frame. */
+  visible: boolean;
+  /** Bumped whenever the geometry changes so backends can avoid redundant work. */
   version: number;
 }
 

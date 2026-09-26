@@ -3,9 +3,9 @@
  * @license MIT
  */
 
-import { Terminal, ITerminalAddon, IEvent } from '@xterm/xterm';
-
 declare module '@partty/addon-webgl' {
+  import { Terminal, ITerminalAddon, IEvent } from '@xterm/xterm';
+
   /**
    * An xterm.js addon that provides hardware-accelerated rendering functionality via WebGL.
    */

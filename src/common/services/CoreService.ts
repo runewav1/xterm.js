@@ -40,6 +40,7 @@ export class CoreService extends Disposable implements ICoreService {
 
   public isCursorInitialized: boolean;
   public isCursorHidden: boolean = false;
+  public cursorPositionChangedAt: number = 0;
   public modes: IModes;
   public decPrivateModes: IDecPrivateModes;
   public kittyKeyboard: IKittyKeyboardState;
@@ -69,6 +70,7 @@ export class CoreService extends Disposable implements ICoreService {
     this.modes = structuredClone(DEFAULT_MODES);
     this.decPrivateModes = structuredClone(DEFAULT_DEC_PRIVATE_MODES);
     this.kittyKeyboard = DEFAULT_KITTY_KEYBOARD_STATE();
+    this.cursorPositionChangedAt = 0;
   }
 
   public triggerDataEvent(data: string, wasUserInput: boolean = false): void {

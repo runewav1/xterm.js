@@ -87,24 +87,39 @@ declare module '@xterm/xterm' {
     cursorInactiveStyle?: 'outline' | 'block' | 'bar' | 'underline' | 'none';
 
     /**
-     * Options for the optional cursor smear animation, which trails the cursor
-     * with a short fading ghost when it moves. Disabled by default and only
-     * implemented by the WebGL and WebGPU renderers; the DOM renderer ignores
-     * it. Assign a new object to change these settings at runtime.
+     * Enables the cursor trail and sets how long (in milliseconds) the cursor
+     * must remain stationary before the trail follows it. The trail is a short,
+     * fading streak drawn from the cursor's prior position. `0` (the default)
+     * disables the trail. This mirrors kitty's `cursor_trail` option.
      *
-     * @example
-     * ```ts
-     * term.options.cursorSmear = {
-     *   enabled: true,
-     *   duration: 140,
-     *   style: 'trail',
-     *   samples: 5,
-     *   opacity: 0.45,
-     *   endScale: 0.6
-     * };
-     * ```
+     * Only the WebGL and WebGPU renderers implement the trail; the DOM
+     * renderer ignores it. The OS `prefers-reduced-motion: reduce` setting
+     * suppresses the trail.
      */
-    cursorSmear?: ICursorSmearOptions;
+    cursorTrail?: number;
+
+    /**
+     * Decay times for the cursor trail in seconds, `[fast, slow]`. The fast
+     * time applies to corners moving in the direction of travel, the slow time
+     * to the trailing corners. The slow value is lifted to at least the fast
+     * value. The default is `[0.1, 0.4]`. Mirrors kitty's `cursor_trail_decay`.
+     */
+    cursorTrailDecay?: CursorTrailDecay;
+
+    /**
+     * How far (in cells) the cursor must move before a trail starts. A single
+     * number applies to both axes; a pair sets the horizontal and vertical
+     * thresholds independently. The default is `2`. Mirrors kitty's
+     * `cursor_trail_start_threshold`.
+     */
+    cursorTrailStartThreshold?: CursorTrailStartThreshold;
+
+    /**
+     * Overrides the trail color. Accepts any CSS color string. The default is
+     * `'none'`, which uses the theme's cursor color. Mirrors kitty's
+     * `cursor_trail_color`.
+     */
+    cursorTrailColor?: string;
 
     /**
      * Whether input should be disabled.
@@ -363,70 +378,18 @@ declare module '@xterm/xterm' {
     windowOptions?: IWindowOptions;
   }
 
-  /** Visual style of the optional GPU cursor smear animation. */
-  export type CursorSmearStyle = 'fade' | 'trail';
-
-  /** Easing used to interpolate the smear trail between cursor positions. */
-  export type CursorSmearEasing = 'linear' | 'easeOut' | 'easeInOut';
+  /**
+   * Decay times for the cursor trail in seconds, `[fast, slow]`. See
+   * {@link ITerminalOptions.cursorTrailDecay}.
+   */
+  export type CursorTrailDecay = [number, number];
 
   /**
-   * Options for the optional GPU cursor smear, see
-   * {@link ITerminalOptions.cursorSmear}.
+   * Start threshold for the cursor trail, either a single cell count applied to
+   * both axes or an `[x, y]` pair. See
+   * {@link ITerminalOptions.cursorTrailStartThreshold}.
    */
-  export interface ICursorSmearOptions {
-    /**
-     * Whether the smear is enabled. The default is false.
-     */
-    enabled?: boolean;
-    /**
-     * Total animation duration in milliseconds. The default is 120.
-     */
-    duration?: number;
-    /**
-     * Visual style of the trail. `'trail'` draws a composed tail of ghosts
-     * while `'fade'` draws a single ghost that fades out at the previous
-     * position. The default is 'trail'.
-     */
-    style?: CursorSmearStyle;
-    /**
-     * Number of ghost samples used by the `'trail'` style, clamped to 1-16.
-     * The default is 4.
-     */
-    samples?: number;
-    /**
-     * Base opacity of the smear, clamped to 0-1. The default is 0.5.
-     */
-    opacity?: number;
-    /**
-     * Overrides the smear color. Accepts any CSS color string; by default the
-     * theme's cursor color is used.
-     */
-    color?: string;
-    /**
-     * Easing used to interpolate the trail position. The default is 'easeOut'.
-     */
-    easing?: CursorSmearEasing;
-    /**
-     * Minimum cursor travel in cells required to start a smear. The default is
-     * 1.
-     */
-    minDistance?: number;
-    /**
-     * Maximum cursor travel in cells that still starts a smear. `0` disables
-     * the limit so ordinary across-line travel always smears. The default is 0.
-     */
-    maxDistance?: number;
-    /**
-     * Scale of the oldest trail ghost, clamped to 0-1, providing a taper
-     * toward the tail. `1` disables the taper. The default is 1.
-     */
-    endScale?: number;
-    /**
-     * Whether the operating system's reduced-motion preference disables the
-     * smear. The default is true.
-     */
-    respectReducedMotion?: boolean;
-  }
+  export type CursorTrailStartThreshold = number | [number, number];
 
   /**
    * An object containing additional options for the terminal that can only be

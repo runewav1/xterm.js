@@ -6,7 +6,7 @@
 import type { Terminal } from '@xterm/xterm';
 import { GlyphRenderModel } from 'browser/renderer/shared/gpu/GlyphRenderModel';
 import { RectangleRenderModel } from 'browser/renderer/shared/gpu/RectangleRenderModel';
-import type { IGlyphRenderer, IGpuBackend, IRectangleRenderer, IRectangleVertices, IRenderModel, ITextureAtlas } from 'browser/renderer/shared/gpu/Types';
+import type { IGlyphRenderer, IGpuBackend, IRectangleRenderer, IRectangleVertices, ICursorTrailVertices, IRenderModel, ITextureAtlas } from 'browser/renderer/shared/gpu/Types';
 import type { IRenderDimensions } from 'browser/renderer/shared/Types';
 import type { IThemeService } from 'browser/services/Services';
 import { Emitter, EventUtils } from 'common/Event';
@@ -71,7 +71,14 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
   private readonly _glyphBuffer: VertexBuffer;
   private readonly _backgroundBuffer: VertexBuffer;
   private readonly _cursorBuffer: VertexBuffer;
-  private readonly _cursorSmearBuffer: VertexBuffer;
+  private readonly _trailBuffer: VertexBuffer;
+  // Trail GPU resources are created on the first trailed frame so an unused
+  // trail allocates nothing. `_trailPositions` expands the four corners into the
+  // two triangles 0,1,2 and 0,2,3 (matching kitty's GL_TRIANGLE_FAN fill).
+  private readonly _trailPositions = new Float32Array(12);
+  private readonly _trailUniforms = new Float32Array(12);
+  private _trailUniformBuffer: GPUBuffer | undefined;
+  private _trailBindGroup: GPUBindGroup | undefined;
   private _atlas: ITextureAtlas | undefined;
   private _atlasGpuGeneration = -1;
   private _atlasBindGroup: GPUBindGroup | undefined;
@@ -103,7 +110,7 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
       this._glyphBuffer = this._register(new VertexBuffer(device, 'xterm glyphs'));
       this._backgroundBuffer = this._register(new VertexBuffer(device, 'xterm backgrounds'));
       this._cursorBuffer = this._register(new VertexBuffer(device, 'xterm cursor'));
-      this._cursorSmearBuffer = this._register(new VertexBuffer(device, 'xterm cursor smear'));
+      this._trailBuffer = this._register(new VertexBuffer(device, 'xterm cursor trail'));
       this._resolutionBuffer = device.createBuffer({ label: 'xterm resolution', size: 16, usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST });
       this._rectangleBindGroup = device.createBindGroup({
         label: 'xterm rectangle viewport',
@@ -292,7 +299,7 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
     }
   }
 
-  public renderRectangles(vertices: IRectangleVertices, kind: 'background' | 'cursor' | 'smear'): void {
+  public renderRectangles(vertices: IRectangleVertices, kind: 'background' | 'cursor'): void {
     const pass = this._pass;
     if (!pass || !vertices.count) {
       return;
@@ -301,11 +308,11 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
     if (!Number.isSafeInteger(vertices.count) || vertices.count < 0 || byteLength > vertices.attributes.byteLength) {
       throw new RangeError('Invalid WebGPU rectangle count');
     }
-    const resource = kind === 'background' ? this._backgroundBuffer : kind === 'cursor' ? this._cursorBuffer : this._cursorSmearBuffer;
+    const resource = kind === 'background' ? this._backgroundBuffer : this._cursorBuffer;
     const allocated = resource.ensure(byteLength);
     const buffer = resource.buffer!;
-    // Cursor and smear geometry changes every frame, so they always upload and
-    // only backgrounds can skip re-uploading an unchanged version.
+    // Cursor geometry changes every frame, so it always uploads; only
+    // backgrounds can skip re-uploading an unchanged version.
     if (kind !== 'background' || allocated || vertices !== this._backgroundVertices || vertices.version !== this._backgroundVersion) {
       this._context.device.queue.writeBuffer(buffer, 0, vertices.attributes.buffer, vertices.attributes.byteOffset, byteLength);
       if (kind === 'background') {
@@ -317,6 +324,58 @@ export class WebgpuBackend extends Disposable implements IGpuBackend {
     pass.setBindGroup(0, this._rectangleBindGroup);
     pass.setVertexBuffer(0, buffer, 0, byteLength);
     pass.draw(4, vertices.count);
+  }
+
+  /**
+   * Draws the cursor trail as a single four-corner quad. This is intentionally
+   * not part of the instanced rectangle path: the quad can be sheared, concave
+   * or self-intersecting as the cursor jumps diagonally, which the axis-aligned
+   * rectangle pipeline cannot represent.
+   */
+  public renderCursorTrail(vertices: ICursorTrailVertices): void {
+    const pass = this._pass;
+    if (!pass || !vertices.visible || vertices.opacity <= 0) {
+      return;
+    }
+    // Two triangles: (0,1,2) and (0,2,3), matching GL_TRIANGLE_FAN.
+    const src = vertices.positions;
+    const p = this._trailPositions;
+    p[0] = src[0]; p[1] = src[1];
+    p[2] = src[2]; p[3] = src[3];
+    p[4] = src[4]; p[5] = src[5];
+    p[6] = src[0]; p[7] = src[1];
+    p[8] = src[4]; p[9] = src[5];
+    p[10] = src[6]; p[11] = src[7];
+
+    this._trailBuffer.ensure(p.byteLength);
+    const buffer = this._trailBuffer.buffer!;
+    this._context.device.queue.writeBuffer(buffer, 0, p, 0, 12);
+
+    if (!this._trailUniformBuffer) {
+      const uniformBuffer = this._trailUniformBuffer = this._context.device.createBuffer({
+        label: 'xterm cursor trail uniforms',
+        size: 48,
+        usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST
+      });
+      this._register(toDisposable(() => uniformBuffer.destroy()));
+      this._trailBindGroup = this._context.device.createBindGroup({
+        label: 'xterm cursor trail',
+        layout: this._context.trailPipeline.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: { buffer: uniformBuffer } }]
+      });
+    }
+
+    const u = this._trailUniforms;
+    u[0] = vertices.cursorRect[0]; u[1] = vertices.cursorRect[1]; u[2] = vertices.cursorRect[2]; u[3] = vertices.cursorRect[3];
+    u[4] = vertices.color[0]; u[5] = vertices.color[1]; u[6] = vertices.color[2]; u[7] = 1;
+    u[8] = vertices.opacity;
+    // Bytes 36..47 (indices 9..11) are padding and left as zero.
+    this._context.device.queue.writeBuffer(this._trailUniformBuffer, 0, u, 0, 12);
+
+    pass.setPipeline(this._context.trailPipeline);
+    pass.setBindGroup(0, this._trailBindGroup!);
+    pass.setVertexBuffer(0, buffer, 0, p.byteLength);
+    pass.draw(6);
   }
 
   private _createBindGroup(gpu: ReturnType<WebgpuContext['getAtlas']>): GPUBindGroup {
@@ -419,9 +478,9 @@ class WebgpuRectangleRenderer extends Disposable implements IRectangleRenderer {
       this._backend.renderRectangles(this._model.cursor, 'cursor');
     }
   }
-  public renderCursorSmear(vertices: IRectangleVertices): void {
+  public renderCursorTrail(vertices: ICursorTrailVertices): void {
     if (!this._store.isDisposed) {
-      this._backend.renderRectangles(vertices, 'smear');
+      this._backend.renderCursorTrail(vertices);
     }
   }
 }

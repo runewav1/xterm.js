@@ -6,7 +6,7 @@
 import { Disposable, toDisposable } from '../Lifecycle';
 import { isMac } from '../Platform';
 import { CursorStyle, IDisposable } from '../Types';
-import { sanitizeCursorSmearOptions } from '../CursorSmear';
+import { sanitizeCursorTrail, sanitizeCursorTrailColor, sanitizeCursorTrailDecay, sanitizeCursorTrailStartThreshold, DEFAULT_CURSOR_TRAIL_DECAY, DEFAULT_CURSOR_TRAIL_START_THRESHOLD } from '../CursorTrail';
 import { FontWeight, IOptionsService, ITerminalOptions } from './Services';
 import { Emitter } from '../Event';
 
@@ -19,7 +19,10 @@ export const DEFAULT_OPTIONS: Readonly<Required<ITerminalOptions>> = {
   cursorStyle: 'block',
   cursorWidth: 1,
   cursorInactiveStyle: 'outline',
-  cursorSmear: {},
+  cursorTrail: 0,
+  cursorTrailDecay: [...DEFAULT_CURSOR_TRAIL_DECAY],
+  cursorTrailStartThreshold: [...DEFAULT_CURSOR_TRAIL_START_THRESHOLD],
+  cursorTrailColor: 'none',
   drawBoldTextInBrightColors: true,
   documentOverride: null,
   fastScrollSensitivity: 5,
@@ -77,9 +80,12 @@ export class OptionsService extends Disposable implements IOptionsService {
     super();
     // set the default value of each option
     const defaultOptions = { ...DEFAULT_OPTIONS };
-    // Nested option objects must be materialized per instance so mutating one
+    // Array-valued options must be materialized per instance so mutating one
     // terminal's options cannot leak into the shared DEFAULT_OPTIONS object.
-    defaultOptions.cursorSmear = sanitizeCursorSmearOptions(defaultOptions.cursorSmear);
+    defaultOptions.cursorTrailDecay = [...defaultOptions.cursorTrailDecay];
+    defaultOptions.cursorTrailStartThreshold = Array.isArray(defaultOptions.cursorTrailStartThreshold)
+      ? [...defaultOptions.cursorTrailStartThreshold]
+      : defaultOptions.cursorTrailStartThreshold;
     for (const key in options) {
       if (key in defaultOptions) {
         try {
@@ -181,8 +187,17 @@ export class OptionsService extends Disposable implements IOptionsService {
           throw new Error(`${key} cannot be less than 0, value: ${value}`);
         }
         break;
-      case 'cursorSmear':
-        value = sanitizeCursorSmearOptions(value);
+      case 'cursorTrail':
+        value = sanitizeCursorTrail(value);
+        break;
+      case 'cursorTrailDecay':
+        value = sanitizeCursorTrailDecay(value);
+        break;
+      case 'cursorTrailStartThreshold':
+        value = sanitizeCursorTrailStartThreshold(value);
+        break;
+      case 'cursorTrailColor':
+        value = sanitizeCursorTrailColor(value);
         break;
       case 'cursorWidth':
         value = Math.floor(value);

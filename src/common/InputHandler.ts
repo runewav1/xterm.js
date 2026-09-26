@@ -24,6 +24,7 @@ import { ApcHandler } from './parser/ApcParser';
 import { parseColor } from './input/XParseColor';
 import { Emitter } from './Event';
 import { XTERM_VERSION } from './Version';
+import { monotonicNow } from './Time';
 
 /**
  * Map collect to glevel. Used in `selectCharset`.
@@ -897,6 +898,28 @@ export class InputHandler extends Disposable implements IInputHandler {
   /**
    * Set absolute cursor position.
    */
+  /**
+   * Records that the client explicitly positioned the cursor. This is the
+   * parse-time activity signal the cursor trail debounces on, analogous to
+   * kitty's `cursor->position_changed_by_client_at`. It must be called while
+   * parsing (not from a render observation) so a whole batch of output does not
+   * overwrite an intermediate position's timestamp, and it must not be called
+   * for ordinary printed text or relative cursor movement.
+   *
+   * Covered controls mirror the exact kitty call sites of `screen_cursor_position`:
+   * CUP/HVP (`cursorPosition`) and VPA (`linePosAbsolute`). CHA/HPA deliberately
+   * do not mark, matching kitty's `screen_cursor_to_column`. DECRC is not marked
+   * either: kitty only records the timestamp on its invalid-savepoint fallback,
+   * which xterm.js cannot distinguish from a real restore, and marking every
+   * restore would suppress trails more often than kitty does.
+   */
+  private _notifyCursorExplicitPosition(): void {
+    this._coreService.cursorPositionChangedAt = monotonicNow();
+  }
+
+  /**
+   * Set absolute cursor position.
+   */
   private _setCursor(x: number, y: number): void {
     this._dirtyRowTracker.markDirty(this._activeBuffer.y);
     if (this._coreService.decPrivateModes.origin) {
@@ -1033,6 +1056,7 @@ export class InputHandler extends Disposable implements IInputHandler {
       // row
       (params.params[0] || 1) - 1
     );
+    this._notifyCursorExplicitPosition();
     return true;
   }
 
@@ -1067,6 +1091,7 @@ export class InputHandler extends Disposable implements IInputHandler {
    */
   public linePosAbsolute(params: IParams): boolean {
     this._setCursor(this._activeBuffer.x, (params.params[0] || 1) - 1);
+    this._notifyCursorExplicitPosition();
     return true;
   }
 

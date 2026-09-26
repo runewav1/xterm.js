@@ -5,7 +5,7 @@
 
 import test, { expect, type Page } from '@playwright/test';
 import { decodePng } from '@lunapaint/png-codec';
-import { ISharedRendererTestContext, injectSharedCursorSmearTests, injectSharedRendererTests, injectSharedRendererTestsStandalone } from '../../../test/playwright/SharedRendererTests';
+import { ISharedRendererTestContext, injectSharedCursorTrailTests, injectSharedRendererTests, injectSharedRendererTestsStandalone } from '../../../test/playwright/SharedRendererTests';
 import { openTerminal } from '../../../test/playwright/TestUtils';
 import { IWebgpuTestContext, assertWebgpuEvents, assertWebgpuRenderer, createWebgpuTestContext, loadWebgpuAddon, waitForWebgpuRender } from './WebgpuTestUtils';
 
@@ -41,7 +41,7 @@ test.describe('WebGPU Renderer Integration Tests', () => {
   injectSharedRendererTestsStandalone(ctxWrapper, async () => {
     await loadWebgpuAddon(ctx);
   });
-  injectSharedCursorSmearTests(ctxWrapper);
+  injectSharedCursorTrailTests(ctxWrapper);
 
   async function writeBoxRow(page: Page, row: number = 0): Promise<void> {
     await page.evaluate(`(async () => {

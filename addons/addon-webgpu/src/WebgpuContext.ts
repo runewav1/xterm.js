@@ -6,7 +6,7 @@
 import type { ITextureAtlas } from 'browser/renderer/shared/gpu/Types';
 import { Emitter } from 'common/Event';
 import { Disposable, toDisposable } from 'common/Lifecycle';
-import { createGlyphShader, rectangleShader } from './WebgpuShaders';
+import { createGlyphShader, rectangleShader, trailShader } from './WebgpuShaders';
 
 const enum Constants {
   MAX_ATLAS_PAGES = 16,
@@ -83,6 +83,7 @@ export class WebgpuContext extends Disposable {
   public readonly maxAtlasPages: number;
   public readonly glyphPipeline: GPURenderPipeline;
   public readonly rectanglePipeline: GPURenderPipeline;
+  private _trailPipeline: GPURenderPipeline | undefined;
   public readonly sampler: GPUSampler;
   public readonly emptyTextureView: GPUTextureView;
   private readonly _onContextLoss = this._register(new Emitter<void>());
@@ -96,6 +97,35 @@ export class WebgpuContext extends Disposable {
   public partialAtlasUpload: boolean;
   /** Internal: dirty-rect count threshold below which a full-page copy is used. */
   public partialUploadThreshold: number;
+
+  /**
+   * Lazily built cursor trail pipeline. Kept out of the constructor so an unused
+   * trail has no GPU cost; the first trail frame compiles it.
+   */
+  public get trailPipeline(): GPURenderPipeline {
+    if (!this._trailPipeline) {
+      const device = this.device;
+      const blend: GPUBlendState = {
+        color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' },
+        alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' }
+      };
+      const module = device.createShaderModule({ label: 'xterm cursor trail shader', code: trailShader });
+      this._trailPipeline = device.createRenderPipeline({
+        label: 'xterm cursor trail pipeline',
+        layout: 'auto',
+        vertex: {
+          module, entryPoint: 'vs',
+          buffers: [{
+            arrayStride: 8, stepMode: 'vertex',
+            attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }]
+          }]
+        },
+        fragment: { module, entryPoint: 'fs', targets: [{ format: this.format, blend }] },
+        primitive: { topology: 'triangle-list' }
+      });
+    }
+    return this._trailPipeline;
+  }
 
   constructor(
     public readonly device: GPUDevice,

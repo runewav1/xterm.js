@@ -91,3 +91,37 @@ struct RectangleOutput {
   return input.color;
 }
 `;
+
+// Cursor trail. A genuine four-corner quad is submitted as two triangles
+// (0,1,2 and 0,2,3) so the fill matches kitty's GL_TRIANGLE_FAN. The fragment
+// stage masks the current cursor rectangle and outputs premultiplied alpha.
+export const trailShader = `${quadSource}
+struct TrailUniforms {
+  cursorRect: vec4f,
+  color: vec4f,
+  opacity: f32,
+}
+@group(0) @binding(0) var<uniform> trail: TrailUniforms;
+
+struct TrailOutput {
+  @builtin(position) position: vec4f,
+  @location(0) pos: vec2f,
+}
+
+@vertex fn vs(
+  @builtin(vertex_index) vertex: u32,
+  @location(0) corner: vec2f
+) -> TrailOutput {
+  var output: TrailOutput;
+  output.position = clip(corner);
+  output.pos = corner;
+  return output;
+}
+
+@fragment fn fs(input: TrailOutput) -> @location(0) vec4f {
+  let insideX = step(trail.cursorRect.x, input.pos.x) * step(input.pos.x, trail.cursorRect.z);
+  let insideY = step(trail.cursorRect.y, input.pos.y) * step(input.pos.y, trail.cursorRect.w);
+  let opacity = trail.opacity * (1.0 - insideX * insideY);
+  return vec4f(trail.color.rgb * opacity, opacity);
+}
+`;

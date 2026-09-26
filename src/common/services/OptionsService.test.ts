@@ -72,76 +72,64 @@ describe('OptionsService', () => {
       assert.equal(service.options.fontWeight, DEFAULT_OPTIONS.fontWeight, 'Wrong string literals should be reset to default');
     });
   });
-  describe('cursorSmear', () => {
-    it('resolves sensible defaults that are disabled', () => {
+  describe('cursorTrail', () => {
+    it('resolves disabled defaults', () => {
       const service = new OptionsService({});
-      assert.deepEqual(service.options.cursorSmear, {
-        enabled: false,
-        duration: 120,
-        style: 'trail',
-        samples: 4,
-        opacity: 0.5,
-        color: undefined,
-        easing: 'easeOut',
-        minDistance: 1,
-        maxDistance: 0,
-        endScale: 1,
-        respectReducedMotion: true
-      });
+      assert.equal(service.options.cursorTrail, 0);
+      assert.deepEqual(service.options.cursorTrailDecay, [0.1, 0.4]);
+      assert.deepEqual(service.options.cursorTrailStartThreshold, [2, 2] as [number, number]);
+      assert.equal(service.options.cursorTrailColor, 'none');
     });
-    it('clamps and normalizes numeric values', () => {
+    it('normalizes numeric values without an arbitrary cap', () => {
       const service = new OptionsService({});
-      service.options.cursorSmear = {
-        enabled: true,
-        duration: 999999,
-        samples: 999,
-        opacity: -1,
-        endScale: 2,
-        minDistance: -5,
-        maxDistance: 3
-      };
-      assert.equal(service.options.cursorSmear.duration, 5000);
-      assert.equal(service.options.cursorSmear.samples, 16);
-      assert.equal(service.options.cursorSmear.opacity, 0);
-      assert.equal(service.options.cursorSmear.endScale, 1);
-      assert.equal(service.options.cursorSmear.minDistance, 0);
-      assert.equal(service.options.cursorSmear.maxDistance, 3);
+      service.options.cursorTrail = 999999.9;
+      assert.equal(service.options.cursorTrail, 999999);
+      service.options.cursorTrail = -5;
+      assert.equal(service.options.cursorTrail, 0);
+      service.options.cursorTrailDecay = [0.4, 0.1];
+      assert.deepEqual(service.options.cursorTrailDecay, [0.4, 0.4]);
+      // An explicit zero is allowed and means "snap instantly".
+      service.options.cursorTrailDecay = [0, 0];
+      assert.deepEqual(service.options.cursorTrailDecay, [0, 0]);
+      service.options.cursorTrailStartThreshold = 5;
+      assert.deepEqual(service.options.cursorTrailStartThreshold as number | [number, number], [5, 5]);
+      service.options.cursorTrailStartThreshold = [1, 3];
+      assert.deepEqual(service.options.cursorTrailStartThreshold as number | [number, number], [1, 3]);
     });
-    it('lifts maxDistance to minDistance when inconsistent', () => {
+    it('coerces non-finite numbers sensibly', () => {
       const service = new OptionsService({});
-      service.options.cursorSmear = { minDistance: 5, maxDistance: 3 };
-      assert.equal(service.options.cursorSmear.maxDistance, 5);
+      service.options.cursorTrail = NaN;
+      assert.equal(service.options.cursorTrail, 0);
+      service.options.cursorTrailDecay = [NaN, Infinity];
+      assert.deepEqual(service.options.cursorTrailDecay, [0.1, 0.4]);
+      service.options.cursorTrailStartThreshold = [NaN, Infinity];
+      assert.deepEqual(service.options.cursorTrailStartThreshold, [2, 2] as [number, number]);
     });
-    it('coerces non-finite numbers to defaults', () => {
+    it('rejects an invalid color and accepts none', () => {
       const service = new OptionsService({});
-      service.options.cursorSmear = { duration: NaN, samples: Infinity, opacity: NaN, endScale: NaN };
-      assert.equal(service.options.cursorSmear.duration, 120);
-      assert.equal(service.options.cursorSmear.samples, 4);
-      assert.equal(service.options.cursorSmear.opacity, 0.5);
-      assert.equal(service.options.cursorSmear.endScale, 1);
+      assert.throws(() => service.options.cursorTrailColor = 'not-a-color', 'color');
+      service.options.cursorTrailColor = '#ff0000';
+      assert.equal(service.options.cursorTrailColor, '#ff0000');
+      service.options.cursorTrailColor = 'none';
+      assert.equal(service.options.cursorTrailColor, 'none');
     });
-    it('rejects invalid enums and colors', () => {
-      const service = new OptionsService({});
-      assert.throws(() => service.options.cursorSmear = { style: 'comet' as any }, 'style');
-      assert.throws(() => service.options.cursorSmear = { easing: 'bounce' as any }, 'easing');
-      assert.throws(() => service.options.cursorSmear = { color: 'not-a-color' }, 'color');
-    });
-    it('does not share the default object across instances', () => {
+    it('does not share default arrays across instances', () => {
       const a = new OptionsService({});
       const b = new OptionsService({});
-      assert.notStrictEqual(a.options.cursorSmear, b.options.cursorSmear);
-      a.options.cursorSmear.enabled = true;
-      assert.equal(b.options.cursorSmear.enabled, false);
-      assert.equal(DEFAULT_OPTIONS.cursorSmear.enabled, undefined);
+      assert.notStrictEqual(a.options.cursorTrailDecay, b.options.cursorTrailDecay);
+      assert.notStrictEqual(a.options.cursorTrailStartThreshold, b.options.cursorTrailStartThreshold);
+      a.options.cursorTrailDecay[0] = 9;
+      assert.equal(b.options.cursorTrailDecay[0], 0.1);
+      assert.equal(DEFAULT_OPTIONS.cursorTrailDecay[0], 0.1);
     });
     it('fires the option change event on reassignment', async () => {
       const service = new OptionsService({});
       await new Promise<void>(r => {
-        service.onSpecificOptionChange('cursorSmear', value => {
-          assert.equal(value!.enabled, true);
+        service.onSpecificOptionChange('cursorTrail', value => {
+          assert.equal(value, 25);
           r();
         });
-        service.options.cursorSmear = { enabled: true };
+        service.options.cursorTrail = 25;
       });
     });
   });
