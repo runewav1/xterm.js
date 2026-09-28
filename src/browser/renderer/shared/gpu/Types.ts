@@ -40,6 +40,8 @@ export interface IGpuBackend extends IDisposable {
 export interface IGlyphRenderer extends IDisposable {
   beginFrame(): boolean;
   updateCell(x: number, y: number, code: number, bg: number, fg: number, ext: number, chars: string, width: number, lastBg: number): void;
+  /** Copy `count` rows of glyph data from row `src` to row `dest`; ranges may overlap. */
+  copyRows(src: number, dest: number, count: number): void;
   clear(): void;
   handleResize(): void;
   render(renderModel: IRenderModel): void;

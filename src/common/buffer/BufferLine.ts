@@ -43,9 +43,17 @@ interface IExtendedAttrsExt extends IExtendedAttrs {
 
 export const DEFAULT_ATTR_DATA = Object.freeze(new AttributeData());
 
+/**
+ * Shared empty `_combined` map. Lines point at it until they store their first
+ * combined string (copy-on-write), so blank lines and copies of plain lines
+ * never allocate or scan a map. Frozen so an unguarded write throws instead of
+ * leaking into every line sharing it.
+ */
+const EMPTY_COMBINED: {[index: number]: string} = Object.freeze(Object.create(null));
+
 // Work variables to avoid garbage collection
-const $workCell = new CellData();
 const $extended = DEFAULT_ATTR_DATA.extended.clone() as IExtendedAttrsExt;
+const $nullCell = CellData.fromCharData([0, NULL_CELL_CHAR, NULL_CELL_WIDTH, NULL_CELL_CODE]);
 
 /**
  * Typed array based bufferline implementation.
@@ -71,10 +79,26 @@ export class BufferLine implements IBufferLine {
   protected _styleBg: number[] = [0];
   /** Lazy fg -> bg -> style id index, built once the table outgrows a linear scan. */
   protected _styleIndex: Map<number, Map<number, number>> | undefined;
-  /** Sparse cache; only read when `IS_COMBINED_MASK` is set in `_content`. */
-  protected _combined: {[index: number]: string} = {};
-  /** Sparse cache; only read when `HAS_EXTENDED` is set in the bg word. */
-  protected _extendedAttrs: {[index: number]: IExtendedAttrs | undefined} = {};
+  /**
+   * Most recently interned non-default style. Printing a run of text with one
+   * SGR state re-interns the same pair per cell; this turns that into a single
+   * compare even when the table is large. `-1` when invalid, and must be reset
+   * whenever style ids are renumbered or the table is replaced.
+   */
+  private _lastStyleId = -1;
+  private _lastStyleFg = 0;
+  private _lastStyleBg = 0;
+  /**
+   * Sparse cache; only read when `IS_COMBINED_MASK` is set in `_content`.
+   * Shares the frozen {@link EMPTY_COMBINED} until written, see `_writableCombined`.
+   */
+  protected _combined: {[index: number]: string} = EMPTY_COMBINED;
+  /**
+   * Sparse cache; only read when `HAS_EXTENDED` is set in the bg word.
+   * `undefined` until written, see `_writableExtendedAttrs`.
+   */
+  // Explicitly initialized so every line shares one hidden class.
+  protected _extendedAttrs: {[index: number]: IExtendedAttrs | undefined} | undefined = undefined;
   public length: number;
 
   /** line text cache */
@@ -89,11 +113,80 @@ export class BufferLine implements IBufferLine {
   ) {
     this._content = new Uint32Array(cols);
     this._styleIds = new Uint16Array(cols);
-    const cell = fillCellData ?? CellData.fromCharData([0, NULL_CELL_CHAR, NULL_CELL_WIDTH, NULL_CELL_CODE]);
-    for (let i = 0; i < cols; ++i) {
-      this.setCell(i, cell);
-    }
+    this._fillRange(0, cols, fillCellData ?? $nullCell);
     this.length = cols;
+  }
+
+  private _writableCombined(): {[index: number]: string} {
+    if (this._combined === EMPTY_COMBINED) {
+      this._combined = {};
+    }
+    return this._combined;
+  }
+
+  private _writableExtendedAttrs(): {[index: number]: IExtendedAttrs | undefined} {
+    return this._extendedAttrs ??= {};
+  }
+
+  /**
+   * Fill cells `[start, end)` with `cell`. Equivalent to calling `setCell` for
+   * each index, but interns the style once and uses typed array fills.
+   */
+  private _fillRange(start: number, end: number, cell: ICellData): void {
+    if (start >= end) {
+      return;
+    }
+    if (cell.content & Content.IS_COMBINED_MASK) {
+      const combined = this._writableCombined();
+      for (let i = start; i < end; i++) {
+        combined[i] = cell.combinedData;
+      }
+    }
+    if (cell.bg & BgFlags.HAS_EXTENDED) {
+      const extendedAttrs = this._writableExtendedAttrs();
+      for (let i = start; i < end; i++) {
+        extendedAttrs[i] = cell.extended;
+      }
+    }
+    // Intern before filling: a compaction inside renumbers existing ids.
+    const styleId = this._internStyle(cell.fg, cell.bg);
+    this._content.fill(cell.content, start, end);
+    this._styleIds.fill(styleId, start, end);
+  }
+
+  /**
+   * Move `length` cells within this line from `src` to `dest`. The style table
+   * is shared, so ids move verbatim; sparse entries follow their flags.
+   */
+  private _moveCells(src: number, dest: number, length: number): void {
+    if (length <= 0 || src === dest) {
+      return;
+    }
+    const combined = this._combined !== EMPTY_COMBINED ? this._combined : undefined;
+    const extendedAttrs = this._extendedAttrs;
+    if (combined || extendedAttrs) {
+      // Iterate so every source is read before it can be overwritten.
+      const reverse = dest > src;
+      for (let i = 0; i < length; i++) {
+        const offset = reverse ? length - 1 - i : i;
+        const s = src + offset;
+        const d = dest + offset;
+        if (combined && (this._content[s] & Content.IS_COMBINED_MASK)) {
+          combined[d] = combined[s];
+        }
+        if (extendedAttrs && (this._styleBg[this._styleIds[s]] & BgFlags.HAS_EXTENDED)) {
+          extendedAttrs[d] = extendedAttrs[s];
+        }
+      }
+    }
+    this._content.copyWithin(dest, src, src + length);
+    this._styleIds.copyWithin(dest, src, src + length);
+  }
+
+  /** Invalidate state derived from style ids after they are renumbered or replaced. */
+  private _resetStyleCache(): void {
+    this._styleIndex = undefined;
+    this._lastStyleId = -1;
   }
 
   /**
@@ -108,6 +201,17 @@ export class BufferLine implements IBufferLine {
     if (fg === 0 && bg === 0) {
       return Constants.DEFAULT_STYLE_ID;
     }
+    if (this._lastStyleId !== -1 && this._lastStyleFg === fg && this._lastStyleBg === bg) {
+      return this._lastStyleId;
+    }
+    const id = this._lookupOrAddStyle(fg, bg);
+    this._lastStyleId = id;
+    this._lastStyleFg = fg;
+    this._lastStyleBg = bg;
+    return id;
+  }
+
+  private _lookupOrAddStyle(fg: number, bg: number): number {
     let fgs = this._styleFg;
     let bgs = this._styleBg;
     // Consecutive writes commonly use the most recently added style.
@@ -189,7 +293,7 @@ export class BufferLine implements IBufferLine {
     }
     this._styleFg = fgs;
     this._styleBg = bgs;
-    this._styleIndex = undefined;
+    this._resetStyleCache();
   }
 
   /**
@@ -221,7 +325,7 @@ export class BufferLine implements IBufferLine {
     const styleId = this._internStyle(value[CHAR_DATA_ATTR_INDEX], this.getBg(index));
     this._styleIds[index] = styleId;
     if (value[CHAR_DATA_CHAR_INDEX].length > 1) {
-      this._combined[index] = value[1];
+      this._writableCombined()[index] = value[1];
       this._content[index] = index | Content.IS_COMBINED_MASK | (value[CHAR_DATA_WIDTH_INDEX] << Content.WIDTH_SHIFT);
     } else {
       this._content[index] = value[CHAR_DATA_CHAR_INDEX].charCodeAt(0) | (value[CHAR_DATA_WIDTH_INDEX] << Content.WIDTH_SHIFT);
@@ -316,10 +420,13 @@ export class BufferLine implements IBufferLine {
 
   public getExtended(index: number): IExtendedAttrs {
     if (this._styleBg[this._styleIds[index]] & BgFlags.HAS_EXTENDED) {
-      return this._extendedAttrs[index]!;
+      const extended = this._extendedAttrs?.[index];
+      if (extended) {
+        return extended;
+      }
     }
     // Do not mutate cell.extended in place: it may still reference this line's map entry from a
-    // prior loadCell into a reused CellData (e.g. $workCell during insert/delete).
+    // prior loadCell into a reused CellData.
     // We use $extended as blueprint and reset the internals
     // mimicking the ctor to avoid a new allocation.
     $extended._ext = 0;
@@ -334,10 +441,10 @@ export class BufferLine implements IBufferLine {
   public setCell(index: number, cell: ICellData): void {
     this._cacheValid = false;
     if (cell.content & Content.IS_COMBINED_MASK) {
-      this._combined[index] = cell.combinedData;
+      this._writableCombined()[index] = cell.combinedData;
     }
     if (cell.bg & BgFlags.HAS_EXTENDED) {
-      this._extendedAttrs[index] = cell.extended;
+      this._writableExtendedAttrs()[index] = cell.extended;
     }
     this._content[index] = cell.content;
     const styleId = this._internStyle(cell.fg, cell.bg);
@@ -352,7 +459,7 @@ export class BufferLine implements IBufferLine {
   public setCellFromCodepoint(index: number, codePoint: number, width: number, attrs: IAttributeData): void {
     this._cacheValid = false;
     if (attrs.bg & BgFlags.HAS_EXTENDED) {
-      this._extendedAttrs[index] = attrs.extended;
+      this._writableExtendedAttrs()[index] = attrs.extended;
     }
     this._content[index] = codePoint | (width << Content.WIDTH_SHIFT);
     const styleId = this._internStyle(attrs.fg, attrs.bg);
@@ -370,13 +477,13 @@ export class BufferLine implements IBufferLine {
     let content = this._content[index];
     if (content & Content.IS_COMBINED_MASK) {
       // we already have a combined string, simply add
-      this._combined[index] += stringFromCodePoint(codePoint);
+      this._writableCombined()[index] += stringFromCodePoint(codePoint);
     } else {
       if (content & Content.CODEPOINT_MASK) {
         // normal case for combining chars:
         //  - move current leading char + new one into combined string
         //  - set combined flag
-        this._combined[index] = stringFromCodePoint(content & Content.CODEPOINT_MASK) + stringFromCodePoint(codePoint);
+        this._writableCombined()[index] = stringFromCodePoint(content & Content.CODEPOINT_MASK) + stringFromCodePoint(codePoint);
         content &= ~Content.CODEPOINT_MASK; // set codepoint in buffer to 0
         content |= Content.IS_COMBINED_MASK;
       } else {
@@ -402,16 +509,10 @@ export class BufferLine implements IBufferLine {
     }
 
     if (n < this.length - pos) {
-      for (let i = this.length - pos - n - 1; i >= 0; --i) {
-        this.setCell(pos + n + i, this.loadCell(pos + i, $workCell));
-      }
-      for (let i = 0; i < n; ++i) {
-        this.setCell(pos + i, fillCellData);
-      }
+      this._moveCells(pos, pos + n, this.length - pos - n);
+      this._fillRange(pos, pos + n, fillCellData);
     } else {
-      for (let i = pos; i < this.length; ++i) {
-        this.setCell(i, fillCellData);
-      }
+      this._fillRange(pos, this.length, fillCellData);
     }
 
     // handle fullwidth at line end: reset last cell if it is first cell of a wide char
@@ -424,16 +525,10 @@ export class BufferLine implements IBufferLine {
     this._cacheValid = false;
     pos %= this.length;
     if (n < this.length - pos) {
-      for (let i = 0; i < this.length - pos - n; ++i) {
-        this.setCell(pos + i, this.loadCell(pos + n + i, $workCell));
-      }
-      for (let i = this.length - n; i < this.length; ++i) {
-        this.setCell(i, fillCellData);
-      }
+      this._moveCells(pos + n, pos, this.length - pos - n);
+      this._fillRange(this.length - n, this.length, fillCellData);
     } else {
-      for (let i = pos; i < this.length; ++i) {
-        this.setCell(i, fillCellData);
-      }
+      this._fillRange(pos, this.length, fillCellData);
     }
 
     // handle fullwidth at pos:
@@ -475,9 +570,7 @@ export class BufferLine implements IBufferLine {
       this.setCellFromCodepoint(end, 0, 1, fillCellData);
     }
 
-    while (start < end  && start < this.length) {
-      this.setCell(start++, fillCellData);
-    }
+    this._fillRange(start, Math.min(end, this.length), fillCellData);
   }
 
   /**
@@ -510,9 +603,7 @@ export class BufferLine implements IBufferLine {
         styleIds.set(this._styleIds);
         this._styleIds = styleIds;
       }
-      for (let i = this.length; i < cols; ++i) {
-        this.setCell(i, fillCellData);
-      }
+      this._fillRange(this.length, cols, fillCellData);
     } else {
       // optimization: just shrink the view on existing buffer
       this._content = this._content.subarray(0, cols);
@@ -521,19 +612,23 @@ export class BufferLine implements IBufferLine {
         this._compactStyles();
       }
       // Remove any cut off combined data
-      const keys = Object.keys(this._combined);
-      for (let i = 0; i < keys.length; i++) {
-        const key = parseInt(keys[i], 10);
-        if (key >= cols) {
-          delete this._combined[key];
+      if (this._combined !== EMPTY_COMBINED) {
+        const keys = Object.keys(this._combined);
+        for (let i = 0; i < keys.length; i++) {
+          const key = parseInt(keys[i], 10);
+          if (key >= cols) {
+            delete this._combined[key];
+          }
         }
       }
       // remove any cut off extended attributes
-      const extKeys = Object.keys(this._extendedAttrs);
-      for (let i = 0; i < extKeys.length; i++) {
-        const key = parseInt(extKeys[i], 10);
-        if (key >= cols) {
-          delete this._extendedAttrs[key];
+      if (this._extendedAttrs) {
+        const extKeys = Object.keys(this._extendedAttrs);
+        for (let i = 0; i < extKeys.length; i++) {
+          const key = parseInt(extKeys[i], 10);
+          if (key >= cols) {
+            delete this._extendedAttrs[key];
+          }
         }
       }
     }
@@ -574,14 +669,21 @@ export class BufferLine implements IBufferLine {
       }
       return;
     }
-    this._combined = {};
-    this._extendedAttrs = {};
-    this._styleFg = [0];
-    this._styleBg = [0];
-    this._styleIndex = undefined;
-    for (let i = 0; i < this.length; ++i) {
-      this.setCell(i, fillCellData);
+    this._combined = EMPTY_COMBINED;
+    this._extendedAttrs = undefined;
+    this._resetStyleTable();
+    this._fillRange(0, this.length, fillCellData);
+  }
+
+  /** Reset to the implicit default-only style table, reusing its arrays. */
+  private _resetStyleTable(): void {
+    // Style tables are never shared between lines, so truncating in place is
+    // safe. Assigning `length` is a slow builtin, so skip it when already reset.
+    if (this._styleFg.length !== 1) {
+      this._styleFg.length = 1;
+      this._styleBg.length = 1;
     }
+    this._resetStyleCache();
   }
 
   /** alter to a full copy of line  */
@@ -606,8 +708,8 @@ export class BufferLine implements IBufferLine {
     if (blank) {
       // a blank line may never hold combined or extended attrs,
       // thus we can skip handling them
-      this._combined = {};
-      this._extendedAttrs = {};
+      this._combined = EMPTY_COMBINED;
+      this._extendedAttrs = undefined;
     } else {
       this._copySparseMapsFrom(line);
     }
@@ -621,8 +723,10 @@ export class BufferLine implements IBufferLine {
     const newLine = new BufferLine(0, undefined, false);
     newLine._content = new Uint32Array(this._content);
     newLine._styleIds = this._styleIds.slice();
-    newLine._styleFg = this._styleFg.slice();
-    newLine._styleBg = this._styleBg.slice();
+    if (this._styleFg.length > 1) {
+      newLine._styleFg = this._styleFg.slice();
+      newLine._styleBg = this._styleBg.slice();
+    }
     newLine.length = this.length;
     if (!blank) {
       // a blank line may never hold combined or extended attrs,
@@ -762,32 +866,50 @@ export class BufferLine implements IBufferLine {
 
   /** Copy the source line's interned style table so ids stay valid. */
   private _copyStyleTableFrom(line: BufferLine): void {
-    this._styleIndex = undefined;
     if (line._styleFg.length <= 1) {
-      this._styleFg = [0];
-      this._styleBg = [0];
+      this._resetStyleTable();
       return;
     }
     this._styleFg = line._styleFg.slice();
     this._styleBg = line._styleBg.slice();
+    this._resetStyleCache();
   }
 
   /** Copy sparse map entries for a single cell when `_content`/bg flags require them. */
   private _copyCellMapsFrom(src: BufferLine, srcCol: number, destCol: number): void {
     if (src._content[srcCol] & Content.IS_COMBINED_MASK) {
-      this._combined[destCol] = src._combined[srcCol];
+      this._writableCombined()[destCol] = src._combined[srcCol];
     }
-    if (src.getBg(srcCol) & BgFlags.HAS_EXTENDED) {
-      this._extendedAttrs[destCol] = src._extendedAttrs[srcCol];
+    if (src._extendedAttrs && (src._styleBg[src._styleIds[srcCol]] & BgFlags.HAS_EXTENDED)) {
+      this._writableExtendedAttrs()[destCol] = src._extendedAttrs[srcCol];
     }
   }
 
-  /** Rebuild sparse maps from another line, keyed only by cell flags. */
+  /**
+   * Rebuild sparse maps from another line. Only the source's existing keys are
+   * visited (not every column), and entries whose cell flag is no longer set are
+   * dropped, so stale data never propagates.
+   */
   private _copySparseMapsFrom(line: BufferLine): void {
-    this._combined = {};
-    this._extendedAttrs = {};
-    for (let i = 0; i < line.length; i++) {
-      this._copyCellMapsFrom(line, i, i);
+    this._combined = EMPTY_COMBINED;
+    this._extendedAttrs = undefined;
+    const srcCombined = line._combined;
+    if (srcCombined !== EMPTY_COMBINED) {
+      for (const key in srcCombined) {
+        const i = +key;
+        if (i < line.length && (line._content[i] & Content.IS_COMBINED_MASK)) {
+          this._writableCombined()[i] = srcCombined[i];
+        }
+      }
+    }
+    const srcExtendedAttrs = line._extendedAttrs;
+    if (srcExtendedAttrs) {
+      for (const key in srcExtendedAttrs) {
+        const i = +key;
+        if (i < line.length && (line._styleBg[line._styleIds[i]] & BgFlags.HAS_EXTENDED)) {
+          this._writableExtendedAttrs()[i] = srcExtendedAttrs[i];
+        }
+      }
     }
   }
 }

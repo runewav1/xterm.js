@@ -2,10 +2,11 @@ import { ISelectionRenderModel } from '../Types';
 import { ICoreBrowserService, IThemeService } from '../../../services/Services';
 import { ReadonlyColorSet } from '../../../Types';
 import { Attributes, BgFlags, ExtFlags, FgFlags, NULL_CELL_CODE, UnderlineStyle } from '../../../../common/buffer/Constants';
-import { IDecorationService, IOptionsService } from '../../../../common/services/Services';
+import { IDecorationService, IInternalDecoration, IOptionsService } from '../../../../common/services/Services';
 import { ICellData } from '../../../../common/buffer/Types';
 import { Terminal } from '@xterm/xterm';
 import { rgba } from '../../../../common/Color';
+import { Disposable } from '../../../../common/Lifecycle';
 import { treatGlyphAsBackgroundColor } from '../RendererUtils';
 import { blockPatternCodepoints } from './customGlyphs/CustomGlyphDefinitions';
 
@@ -18,7 +19,19 @@ let $isSelected = false;
 let $colors: ReadonlyColorSet | undefined;
 let $variantOffset = 0;
 
-export class CellColorResolver {
+// Hoisted so the per-cell decoration lookups do not allocate a closure each call.
+function applyDecorationColors(d: IInternalDecoration): void {
+  if (d.backgroundColorRGB) {
+    $bg = d.backgroundColorRGB.rgba >> 8 & Attributes.RGB_MASK;
+    $hasBg = true;
+  }
+  if (d.foregroundColorRGB) {
+    $fg = d.foregroundColorRGB.rgba >> 8 & Attributes.RGB_MASK;
+    $hasFg = true;
+  }
+}
+
+export class CellColorResolver extends Disposable {
   /**
    * The shared result of the {@link resolve} call. This is only safe to use immediately after as
    * any other calls will share object.
@@ -29,6 +42,9 @@ export class CellColorResolver {
     ext: 0
   };
 
+  /** Live decoration count, so cells skip both decoration lookups while there are none. */
+  private _decorationCount = 0;
+
   constructor(
     private readonly _terminal: Terminal,
     private readonly _optionService: IOptionsService,
@@ -37,6 +53,10 @@ export class CellColorResolver {
     private readonly _coreBrowserService: ICoreBrowserService,
     private readonly _themeService: IThemeService
   ) {
+    super();
+    this._decorationCount = Array.from(this._decorationService.decorations).length;
+    this._register(this._decorationService.onDecorationRegistered(() => this._decorationCount++));
+    this._register(this._decorationService.onDecorationRemoved(() => this._decorationCount--));
   }
 
   /**
@@ -68,16 +88,10 @@ export class CellColorResolver {
       $variantOffset = ((x * deviceCellWidth) % 2) * 2 + ((y * deviceCellHeight) % 2);
     }
     // Apply decorations on the bottom layer
-    this._decorationService.forEachDecorationAtCell(x, y, 'bottom', d => {
-      if (d.backgroundColorRGB) {
-        $bg = d.backgroundColorRGB.rgba >> 8 & Attributes.RGB_MASK;
-        $hasBg = true;
-      }
-      if (d.foregroundColorRGB) {
-        $fg = d.foregroundColorRGB.rgba >> 8 & Attributes.RGB_MASK;
-        $hasFg = true;
-      }
-    });
+    const hasDecorations = this._decorationCount > 0;
+    if (hasDecorations) {
+      this._decorationService.forEachDecorationAtCell(x, y, 'bottom', applyDecorationColors);
+    }
 
     // Apply the selection color if needed
     $isSelected = this._selectionRenderModel.isCellSelected(this._terminal, x, y);
@@ -175,16 +189,9 @@ export class CellColorResolver {
     }
 
     // Apply decorations on the top layer
-    this._decorationService.forEachDecorationAtCell(x, y, 'top', d => {
-      if (d.backgroundColorRGB) {
-        $bg = d.backgroundColorRGB.rgba >> 8 & Attributes.RGB_MASK;
-        $hasBg = true;
-      }
-      if (d.foregroundColorRGB) {
-        $fg = d.foregroundColorRGB.rgba >> 8 & Attributes.RGB_MASK;
-        $hasFg = true;
-      }
-    });
+    if (hasDecorations) {
+      this._decorationService.forEachDecorationAtCell(x, y, 'top', applyDecorationColors);
+    }
 
     // Convert any overrides from rgba to the fg/bg packed format. This resolves the inverse flag
     // ahead of time in order to use the correct cache key

@@ -896,9 +896,6 @@ export class InputHandler extends Disposable implements IInputHandler {
   }
 
   /**
-   * Set absolute cursor position.
-   */
-  /**
    * Records that the client explicitly positioned the cursor. This is the
    * parse-time activity signal the cursor trail debounces on, analogous to
    * kitty's `cursor->position_changed_by_client_at`. It must be called while

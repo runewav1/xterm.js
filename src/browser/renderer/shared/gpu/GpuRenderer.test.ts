@@ -25,7 +25,14 @@ class FakeGlyphRenderer implements IGlyphRenderer {
     this.beginFrameCalls++;
     return this.beginFrameResults.shift() ?? false;
   }
-  public updateCell(): void {}
+  public updatedCells: { x: number, y: number, code: number, chars: string }[] = [];
+  public copyRowsCalls: { src: number, dest: number, count: number }[] = [];
+  public updateCell(x: number, y: number, code: number, _bg: number, _fg: number, _ext: number, chars: string): void {
+    this.updatedCells.push({ x, y, code, chars });
+  }
+  public copyRows(src: number, dest: number, count: number): void {
+    this.copyRowsCalls.push({ src, dest, count });
+  }
   public clear(): void { this.clearCalls++; }
   public handleResize(): void {}
   public render(): void { this.renderCalls++; }
@@ -215,6 +222,106 @@ describe('GpuRenderer', () => {
     assert.ok(rectangleRenderer.updateBackgroundsCalls.length > callsBefore);
     const lastCall = rectangleRenderer.updateBackgroundsCalls[rectangleRenderer.updateBackgroundsCalls.length - 1];
     assert.deepStrictEqual([lastCall.startRow, lastCall.endRow], [0, 0]);
+  });
+
+  describe('shifted row reuse', () => {
+    const COLS = 6;
+    const ROWS = 5;
+
+    beforeEach(() => {
+      terminal.resize(COLS, ROWS);
+      renderer.handleResize(COLS, ROWS);
+      coreService.isCursorHidden = true;
+    });
+
+    function modelSnapshot(): number[] {
+      return Array.from((renderer as any)._model.cells as Uint32Array);
+    }
+
+    function fullRebuildSnapshot(): number[] {
+      clearModel(true);
+      updateModel(0, ROWS - 1);
+      return modelSnapshot();
+    }
+
+    it('moves rows after a scroll and only updates the newly exposed row', async () => {
+      await writeSync('\x1b[31maaaa\r\n\x1b[32mbbbb\r\n\x1b[33mcccc\r\n\x1b[34mdddd\r\n\x1b[35meeee');
+      updateModel(0, ROWS - 1);
+      glyphRenderer.updatedCells.length = 0;
+
+      await writeSync('\r\n\x1b[36mffff');
+      updateModel(0, ROWS - 1);
+
+      assert.deepStrictEqual(glyphRenderer.copyRowsCalls, [{ src: 1, dest: 0, count: ROWS - 1 }]);
+      assert.ok(glyphRenderer.updatedCells.length > 0);
+      assert.ok(glyphRenderer.updatedCells.every(c => c.y === ROWS - 1), 'only the new row is rebuilt');
+      const reused = modelSnapshot();
+      assert.deepStrictEqual(reused, fullRebuildSnapshot());
+    });
+
+    it('moves rows downwards for a reverse scroll inside a scroll region', async () => {
+      await writeSync('\x1b[31maaaa\r\n\x1b[32mbbbb\r\n\x1b[33mcccc\r\n\x1b[34mdddd\r\n\x1b[35meeee');
+      updateModel(0, ROWS - 1);
+      glyphRenderer.updatedCells.length = 0;
+
+      // Region rows 2-4 (1-based), scroll down one line.
+      await writeSync('\x1b[2;4r\x1b[T');
+      updateModel(1, 3);
+
+      assert.deepStrictEqual(glyphRenderer.copyRowsCalls, [{ src: 1, dest: 2, count: 2 }]);
+      assert.ok(glyphRenderer.updatedCells.every(c => c.y === 1), 'only the blank inserted row is rebuilt');
+      const reused = modelSnapshot();
+      assert.deepStrictEqual(reused, fullRebuildSnapshot());
+    });
+
+    it('stays correct when a moved line was also modified', async () => {
+      await writeSync('aaaa\r\nbbbb\r\ncccc\r\ndddd\r\neeee');
+      updateModel(0, ROWS - 1);
+
+      await writeSync('\r\nffff\x1b[2;1H\x1b[41mXY');
+      updateModel(0, ROWS - 1);
+
+      assert.strictEqual(glyphRenderer.copyRowsCalls.length, 1);
+      const reused = modelSnapshot();
+      assert.deepStrictEqual(reused, fullRebuildSnapshot());
+    });
+
+    it('rebuilds backgrounds for moved rows', async () => {
+      await writeSync('\x1b[41maaaa\x1b[0m\r\nbbbb\r\ncccc\r\ndddd\r\neeee');
+      updateModel(0, ROWS - 1);
+      const callsBefore = rectangleRenderer.updateBackgroundsCalls.length;
+
+      await writeSync('\r\nffff');
+      updateModel(0, ROWS - 1);
+
+      assert.strictEqual(rectangleRenderer.updateBackgroundsCalls.length, callsBefore + 1);
+    });
+
+    it('does not reuse rows after the model is cleared', async () => {
+      await writeSync('aaaa\r\nbbbb\r\ncccc\r\ndddd\r\neeee');
+      updateModel(0, ROWS - 1);
+      clearModel(true);
+      await writeSync('\r\nffff');
+      updateModel(0, ROWS - 1);
+      assert.strictEqual(glyphRenderer.copyRowsCalls.length, 0);
+    });
+  });
+
+  it('skips unchanged astral cells but always updates combined cells', async () => {
+    terminal.options.cursorStyle = 'bar';
+    await writeSync('\u{1F600}');
+    updateModel(0, 0);
+    glyphRenderer.updatedCells.length = 0;
+    updateModel(0, 0);
+    assert.strictEqual(glyphRenderer.updatedCells.filter(c => c.chars === '\u{1F600}').length, 0);
+
+    await writeSync('\r\x1b[Ke\u0301');
+    updateModel(0, 0);
+    glyphRenderer.updatedCells.length = 0;
+    updateModel(0, 0);
+    // A combined cell's code is only its last codepoint, so it cannot prove the
+    // string is unchanged.
+    assert.strictEqual(glyphRenderer.updatedCells.filter(c => c.chars === 'e\u0301').length, 1);
   });
 
   it('preserves the cursor model when refreshing rows that do not contain the cursor', () => {

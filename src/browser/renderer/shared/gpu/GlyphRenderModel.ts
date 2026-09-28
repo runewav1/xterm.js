@@ -102,6 +102,27 @@ export class GlyphRenderModel {
     }
   }
 
+  /**
+   * Copy `count` rows of glyph data from row `src` to row `dest`. Only the
+   * glyph fields move; each destination cell keeps its own position.
+   */
+  public copyRows(src: number, dest: number, count: number): void {
+    const cols = this._terminal.cols;
+    const rows = this._terminal.rows;
+    const rowStride = cols * GlyphRenderModelConstants.INDICES_PER_CELL;
+    const array = this._attributes;
+    array.copyWithin(dest * rowStride, src * rowStride, (src + count) * rowStride);
+    for (let y = dest; y < dest + count; y++) {
+      // Must match the position written by clear().
+      const cellY = y / rows;
+      let i = y * rowStride;
+      for (let x = 0; x < cols; x++) {
+        array[i + 10] = cellY;
+        i += GlyphRenderModelConstants.INDICES_PER_CELL;
+      }
+    }
+  }
+
   public clear(): void {
     const terminal = this._terminal;
     const newCount = terminal.cols * terminal.rows * GlyphRenderModelConstants.INDICES_PER_CELL;

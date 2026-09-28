@@ -48,6 +48,14 @@ export class GpuRenderer extends Disposable implements IRenderer {
   private _rowHasBlinkingCells: boolean[] = [];
   private _rowHasBlinkingCellsCount: number = 0;
   private _forceBackgroundUpdate: boolean = false;
+  /**
+   * The buffer line each viewport row was last drawn from. Scrolling moves line
+   * objects between rows, so this identifies model rows that can be moved into
+   * place instead of rebuilt cell by cell. Only a hint: moved rows still go
+   * through the full per-cell comparison.
+   */
+  private _rowLines: (IBufferLine | undefined)[] = [];
+  private readonly _rowLineIndex = new Map<IBufferLine, number>();
   private _workCell: ICellData = new CellData();
   private _cellColorResolver: CellColorResolver;
 
@@ -102,7 +110,7 @@ export class GpuRenderer extends Disposable implements IRenderer {
     try {
       this._register(this._themeService.onChangeColors(() => this._handleColorChange()));
 
-      this._cellColorResolver = new CellColorResolver(this._terminal, this._optionsService, this._model.selection, this._decorationService, this._coreBrowserService, this._themeService);
+      this._cellColorResolver = this._register(new CellColorResolver(this._terminal, this._optionsService, this._model.selection, this._decorationService, this._coreBrowserService, this._themeService));
 
       this._core = (this._terminal as any)._core;
 
@@ -331,6 +339,7 @@ export class GpuRenderer extends Disposable implements IRenderer {
    */
   private _clearModel(clearGlyphRenderer: boolean): void {
     this._model.clear();
+    this._rowLines = new Array(this._terminal.rows).fill(undefined);
     // The background rectangle caches live in the rectangle renderer and are not
     // invalidated by clearing the model. Force the next update to rescan the
     // whole viewport, otherwise a stale cache survives even when the re-render
@@ -466,6 +475,7 @@ export class GpuRenderer extends Disposable implements IRenderer {
     let isCursorRow: boolean;
     let chars: string;
     let code: number;
+    let forceUpdate: boolean;
     let width: number;
     let i: number;
     let x: number;
@@ -495,15 +505,30 @@ export class GpuRenderer extends Disposable implements IRenderer {
     // derives the trail geometry (blink-independent) when the trail is enabled.
     this._updateCursorModel();
     this._cursorTrail.setCursor(this._trailCursor);
-    let backgroundUpdated = false;
+    // Rows are moved into place from where their line was last drawn, so only
+    // cells that genuinely differ reach the glyph atlas and vertex writes below.
+    let backgroundUpdated = this._reuseShiftedRows(start, end);
+
+    const cols = terminal.cols;
+    const cells = this._model.cells;
+    const result = this._cellColorResolver.result;
+    const glyphRenderer = this._glyphRenderer.value!;
+    const deviceCellWidth = this.dimensions.device.cell.width;
+    const deviceCellHeight = this.dimensions.device.cell.height;
+    const hideBlinkingText = this._textBlinkStateManager.isEnabled && !this._textBlinkStateManager.isBlinkOn;
+    const isBlockCursor = this._coreBrowserService.isFocused
+      ? cursorStyle === 'block'
+      : terminal.options.cursorInactiveStyle === 'block';
+    const drawBlockCursor = isCursorVisible && isBlockCursor;
 
     for (y = start; y <= end; y++) {
       row = y + terminal.buffer.ydisp;
       const bufferLine = terminal.buffer.lines.get(row);
+      this._rowLines[y] = bufferLine;
       if (!bufferLine) {
         this._model.lineLengths[y] = 0;
-        for (x = 0; x < terminal.cols; x++) {
-          j = ((y * terminal.cols) + x) * RenderModelConstants.INDICIES_PER_CELL;
+        for (x = 0; x < cols; x++) {
+          j = ((y * cols) + x) * RenderModelConstants.INDICIES_PER_CELL;
           // _nullModelCell bypasses the change comparison in the main loop, so
           // conservatively flag the background as dirty too.
           backgroundUpdated = true;
@@ -518,13 +543,9 @@ export class GpuRenderer extends Disposable implements IRenderer {
       isCursorRow = cursorY === row;
       skipJoinedCheckUntilX = 0;
       joinedRanges = this._characterJoinerService.getJoinedCharacters(row);
-      for (x = 0; x < terminal.cols; x++) {
-        lastBg = this._cellColorResolver.result.bg;
+      for (x = 0; x < cols; x++) {
+        lastBg = result.bg;
         line.loadCell(x, cell);
-
-        if (x === 0) {
-          lastBg = this._cellColorResolver.result.bg;
-        }
 
         // If true, indicates that the current character(s) to draw were joined.
         isJoined = false;
@@ -567,48 +588,62 @@ export class GpuRenderer extends Disposable implements IRenderer {
           }
         }
 
-        chars = cell.getChars();
         code = cell.getCode();
-        i = ((y * terminal.cols) + x) * RenderModelConstants.INDICIES_PER_CELL;
+        // Multi-unit strings are stored with COMBINED_CHAR_BIT_MASK. A combined
+        // (or joined) cell's code is only its last codepoint, so it cannot prove
+        // the string is unchanged and always updates. An astral codepoint is
+        // unique, so it takes the unchanged check with the mask applied. Plain
+        // cells defer building their string until they actually changed.
+        forceUpdate = false;
+        if (cell.isCombined()) {
+          chars = cell.getChars();
+          if (chars.length > 1) {
+            code |= COMBINED_CHAR_BIT_MASK;
+            forceUpdate = true;
+          }
+        } else {
+          chars = '';
+          if (code > 0xFFFF) {
+            code |= COMBINED_CHAR_BIT_MASK;
+          }
+        }
+        i = ((y * cols) + x) * RenderModelConstants.INDICIES_PER_CELL;
 
         if (!rowHasBlinkingCells && cell.isBlink()) {
           rowHasBlinkingCells = true;
         }
 
         // Load colors/resolve overrides into work colors
-        this._cellColorResolver.resolve(cell, x, row, this.dimensions.device.cell.width, this.dimensions.device.cell.height);
+        this._cellColorResolver.resolve(cell, x, row, deviceCellWidth, deviceCellHeight);
 
         // Override colors for cursor cell
-        if (isCursorVisible && row === cursorY) {
+        if (drawBlockCursor && isCursorRow) {
           if (x === cursorX) {
             lastCursorX = cursorX + cell.getWidth() - 1;
           }
-          if (x >= cursorX && x <= lastCursorX &&
-              ((this._coreBrowserService.isFocused &&
-              cursorStyle === 'block') ||
-              (this._coreBrowserService.isFocused === false &&
-              terminal.options.cursorInactiveStyle === 'block'))
-          ) {
-            this._cellColorResolver.result.fg =
+          if (x >= cursorX && x <= lastCursorX) {
+            result.fg =
               Attributes.CM_RGB | (this._themeService.colors.cursorAccent.rgba >> 8 & Attributes.RGB_MASK);
-            this._cellColorResolver.result.bg =
+            result.bg =
               Attributes.CM_RGB | (this._themeService.colors.cursor.rgba >> 8 & Attributes.RGB_MASK);
           }
         }
 
-        if (this._textBlinkStateManager.isEnabled && !this._textBlinkStateManager.isBlinkOn && cell.isBlink()) {
-          this._cellColorResolver.result.fg |= FgFlags.INVISIBLE;
+        if (hideBlinkingText && cell.isBlink()) {
+          result.fg |= FgFlags.INVISIBLE;
         }
 
         if (code !== NULL_CELL_CODE) {
           this._model.lineLengths[y] = x + 1;
         }
 
-        // Nothing has changed, no updates needed
-        if (this._model.cells[i] === code &&
-            this._model.cells[i + RenderModelConstants.BG_OFFSET] === this._cellColorResolver.result.bg &&
-            this._model.cells[i + RenderModelConstants.FG_OFFSET] === this._cellColorResolver.result.fg &&
-            this._model.cells[i + RenderModelConstants.EXT_OFFSET] === this._cellColorResolver.result.ext) {
+        // Nothing has changed, no updates needed. The model is unsigned while a
+        // masked code is negative, hence the unsigned compare.
+        if (!forceUpdate &&
+            cells[i] === code >>> 0 &&
+            cells[i + RenderModelConstants.BG_OFFSET] === result.bg &&
+            cells[i + RenderModelConstants.FG_OFFSET] === result.fg &&
+            cells[i + RenderModelConstants.EXT_OFFSET] === result.ext) {
           continue;
         }
 
@@ -617,24 +652,23 @@ export class GpuRenderer extends Disposable implements IRenderer {
         // background repack. Joined ranges null out cells without going through
         // this comparison, so treat them conservatively.
         if (isJoined ||
-            this._model.cells[i + RenderModelConstants.BG_OFFSET] !== this._cellColorResolver.result.bg ||
-            ((this._model.cells[i + RenderModelConstants.FG_OFFSET] ^ this._cellColorResolver.result.fg) & FgFlags.INVERSE)) {
+            cells[i + RenderModelConstants.BG_OFFSET] !== result.bg ||
+            ((cells[i + RenderModelConstants.FG_OFFSET] ^ result.fg) & FgFlags.INVERSE)) {
           backgroundUpdated = true;
         }
 
-        // Flag combined chars with a bit mask so they're easily identifiable
-        if (chars.length > 1) {
-          code |= COMBINED_CHAR_BIT_MASK;
+        if (!chars) {
+          chars = cell.getChars();
         }
 
         // Cache the results in the model
-        this._model.cells[i] = code;
-        this._model.cells[i + RenderModelConstants.BG_OFFSET] = this._cellColorResolver.result.bg;
-        this._model.cells[i + RenderModelConstants.FG_OFFSET] = this._cellColorResolver.result.fg;
-        this._model.cells[i + RenderModelConstants.EXT_OFFSET] = this._cellColorResolver.result.ext;
+        cells[i] = code;
+        cells[i + RenderModelConstants.BG_OFFSET] = result.bg;
+        cells[i + RenderModelConstants.FG_OFFSET] = result.fg;
+        cells[i + RenderModelConstants.EXT_OFFSET] = result.ext;
 
         width = cell.getWidth();
-        this._glyphRenderer.value!.updateCell(x, y, code, this._cellColorResolver.result.bg, this._cellColorResolver.result.fg, this._cellColorResolver.result.ext, chars, width, lastBg);
+        glyphRenderer.updateCell(x, y, code, result.bg, result.fg, result.ext, chars, width, lastBg);
 
         if (isJoined) {
           // Restore work cell
@@ -642,10 +676,10 @@ export class GpuRenderer extends Disposable implements IRenderer {
 
           // Null out non-first cells
           for (x++; x <= lastCharX; x++) {
-            j = ((y * terminal.cols) + x) * RenderModelConstants.INDICIES_PER_CELL;
+            j = ((y * cols) + x) * RenderModelConstants.INDICIES_PER_CELL;
             // Don't re-resolve the cell color since multi-colored ligature backgrounds are not
             // supported
-            this._nullModelCell(x, y, j, this._cellColorResolver.result.bg, this._cellColorResolver.result.fg, this._cellColorResolver.result.ext);
+            this._nullModelCell(x, y, j, result.bg, result.fg, result.ext);
           }
           x--; // Go back to the previous update cell for next iteration
         }
@@ -663,6 +697,85 @@ export class GpuRenderer extends Disposable implements IRenderer {
     }
     this._rectangleRenderer.value!.updateCursor(this._model);
     this._updateTextBlinkState();
+  }
+
+  /**
+   * Moves model and glyph rows for lines that were last drawn at a different
+   * viewport row, e.g. after a scroll (viewport, scroll region, IL/DL, SU/SD).
+   * One uniform shift is applied, taken from the first moved row in
+   * `[start, end]`; rows that moved differently fall back to the normal path.
+   * The caller still compares every cell afterwards, so a wrong hint only costs
+   * the copy and can never leave stale content. Returns whether any row moved,
+   * in which case background rectangles must be rebuilt for the range.
+   */
+  private _reuseShiftedRows(start: number, end: number): boolean {
+    const rows = this._terminal.rows;
+    const rowLines = this._rowLines;
+    if (start >= end || rowLines.length !== rows) {
+      return false;
+    }
+    const lines = this._core.buffer.lines;
+    const ydisp = this._core.buffer.ydisp;
+    const index = this._rowLineIndex;
+    index.clear();
+    for (let y = 0; y < rows; y++) {
+      const line = rowLines[y];
+      if (line) {
+        index.set(line, y);
+      }
+    }
+    if (!index.size) {
+      return false;
+    }
+
+    let shift = 0;
+    for (let y = start; y <= end; y++) {
+      const line = lines.get(y + ydisp);
+      const previous = line ? index.get(line) : undefined;
+      if (previous !== undefined && previous !== y) {
+        shift = previous - y;
+        break;
+      }
+    }
+    index.clear();
+    if (shift === 0) {
+      return false;
+    }
+
+    // Copy contiguous runs of rows matching the shift. Runs are visited in the
+    // direction that reads every source row before it is overwritten.
+    const glyphRenderer = this._glyphRenderer.value!;
+    const cells = this._model.cells;
+    const rowStride = this._terminal.cols * RenderModelConstants.INDICIES_PER_CELL;
+    const step = shift > 0 ? 1 : -1;
+    const first = shift > 0 ? start : end;
+    const last = shift > 0 ? end + 1 : start - 1;
+    let moved = false;
+    let runStart = -1;
+    for (let y = first; ; y += step) {
+      const source = y + shift;
+      const matches = y !== last && source >= 0 && source < rows &&
+        rowLines[source] !== undefined && rowLines[source] === lines.get(y + ydisp);
+      if (matches) {
+        if (runStart === -1) {
+          runStart = y;
+        }
+        continue;
+      }
+      if (runStart !== -1) {
+        const destStart = Math.min(runStart, y - step);
+        const count = Math.abs(y - runStart);
+        const sourceStart = destStart + shift;
+        cells.copyWithin(destStart * rowStride, sourceStart * rowStride, (sourceStart + count) * rowStride);
+        glyphRenderer.copyRows(sourceStart, destStart, count);
+        moved = true;
+        runStart = -1;
+      }
+      if (y === last) {
+        break;
+      }
+    }
+    return moved;
   }
 
   /**

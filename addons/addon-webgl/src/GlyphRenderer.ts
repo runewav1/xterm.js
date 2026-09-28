@@ -95,6 +95,13 @@ export class GlyphRenderer extends Disposable implements IGlyphRenderer {
   private readonly _model: GlyphRenderModel;
   private _pageOverflowWarned: boolean = false;
   private _activeBuffer: number = 0;
+  /**
+   * Whether glyph data changed since the last upload. Frames that only redraw
+   * (cursor blink, trail animation) reuse the uploaded buffer as is.
+   */
+  private _isVertexDataDirty: boolean = true;
+  private _uploadedLineLengths = new Uint32Array(0);
+  private _uploadedInstanceCount: number = 0;
   private readonly _vertices: IVertices = {
     count: 0,
     attributesBuffers: [
@@ -212,6 +219,12 @@ export class GlyphRenderer extends Disposable implements IGlyphRenderer {
 
   public updateCell(x: number, y: number, code: number, bg: number, fg: number, ext: number, chars: string, width: number, lastBg: number): void {
     this._model.updateCell(x, y, code, bg, fg, ext, chars, width, lastBg);
+    this._isVertexDataDirty = true;
+  }
+
+  public copyRows(src: number, dest: number, count: number): void {
+    this._model.copyRows(src, dest, count);
+    this._isVertexDataDirty = true;
   }
 
   public clear(): void {
@@ -225,6 +238,7 @@ export class GlyphRenderer extends Disposable implements IGlyphRenderer {
       }
     }
     this._vertices.count = newCount;
+    this._isVertexDataDirty = true;
   }
 
   public handleResize(): void {
@@ -246,28 +260,9 @@ export class GlyphRenderer extends Disposable implements IGlyphRenderer {
     gl.useProgram(this._program);
     gl.bindVertexArray(this._vertexArrayObject);
 
-    // Alternate buffers each frame as the active buffer gets locked while it's in use by the GPU
-    this._activeBuffer = (this._activeBuffer + 1) % 2;
-    const activeBuffer = this._vertices.attributesBuffers[this._activeBuffer];
-
-    // Copy data for each cell of each line up to its line length (the last non-whitespace cell)
-    // from the attributes buffer into activeBuffer, which is the one that gets bound to the GPU.
-    // The reasons for this are as follows:
-    // - So the active buffer can be alternated so we don't get blocked on rendering finishing
-    // - To copy either the normal attributes buffer or the selection attributes buffer when there
-    //   is a selection
-    // - So we don't send vertices for all the line-ending whitespace to the GPU
-    let bufferLength = 0;
-    for (let y = 0; y < renderModel.lineLengths.length; y++) {
-      const si = y * this._terminal.cols * Constants.INDICES_PER_CELL;
-      const sub = this._model.attributes.subarray(si, si + renderModel.lineLengths[y] * Constants.INDICES_PER_CELL);
-      activeBuffer.set(sub, bufferLength);
-      bufferLength += sub.length;
+    if (this._isVertexDataDirty || !this._lineLengthsMatchUpload(renderModel.lineLengths)) {
+      this._uploadVertexData(gl, renderModel.lineLengths);
     }
-
-    // Bind the attributes buffer
-    gl.bindBuffer(gl.ARRAY_BUFFER, this._attributesBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, activeBuffer.subarray(0, bufferLength), gl.STREAM_DRAW);
 
     // Bind the atlas page texture if they have changed. AtlasPage.version is globally
     // monotonic, so a page object swap at the same index (which happens after a page merge)
@@ -293,7 +288,52 @@ export class GlyphRenderer extends Disposable implements IGlyphRenderer {
     this._uploadedAtlasPageCount = pageCount;
 
     // Draw the viewport
-    gl.drawElementsInstanced(gl.TRIANGLE_STRIP, 4, gl.UNSIGNED_BYTE, 0, bufferLength / Constants.INDICES_PER_CELL);
+    gl.drawElementsInstanced(gl.TRIANGLE_STRIP, 4, gl.UNSIGNED_BYTE, 0, this._uploadedInstanceCount);
+  }
+
+  private _lineLengthsMatchUpload(lineLengths: Uint32Array): boolean {
+    const uploaded = this._uploadedLineLengths;
+    if (uploaded.length !== lineLengths.length) {
+      return false;
+    }
+    for (let y = 0; y < lineLengths.length; y++) {
+      if (uploaded[y] !== lineLengths[y]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private _uploadVertexData(gl: IWebGL2RenderingContext, lineLengths: Uint32Array): void {
+    // Alternate buffers each upload as the active buffer gets locked while it's in use by the GPU
+    this._activeBuffer = (this._activeBuffer + 1) % 2;
+    const activeBuffer = this._vertices.attributesBuffers[this._activeBuffer];
+
+    // Copy data for each cell of each line up to its line length (the last non-whitespace cell)
+    // from the attributes buffer into activeBuffer, which is the one that gets bound to the GPU.
+    // The reasons for this are as follows:
+    // - So the active buffer can be alternated so we don't get blocked on rendering finishing
+    // - To copy either the normal attributes buffer or the selection attributes buffer when there
+    //   is a selection
+    // - So we don't send vertices for all the line-ending whitespace to the GPU
+    let bufferLength = 0;
+    for (let y = 0; y < lineLengths.length; y++) {
+      const si = y * this._terminal.cols * Constants.INDICES_PER_CELL;
+      const sub = this._model.attributes.subarray(si, si + lineLengths[y] * Constants.INDICES_PER_CELL);
+      activeBuffer.set(sub, bufferLength);
+      bufferLength += sub.length;
+    }
+
+    // Bind the attributes buffer
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._attributesBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, activeBuffer.subarray(0, bufferLength), gl.STREAM_DRAW);
+
+    if (this._uploadedLineLengths.length !== lineLengths.length) {
+      this._uploadedLineLengths = new Uint32Array(lineLengths.length);
+    }
+    this._uploadedLineLengths.set(lineLengths);
+    this._uploadedInstanceCount = bufferLength / Constants.INDICES_PER_CELL;
+    this._isVertexDataDirty = false;
   }
 
   public setAtlas(atlas: ITextureAtlas): void {

@@ -905,6 +905,107 @@ describe('BufferLine', function(): void {
     });
   });
 
+  describe('lazy sparse maps', () => {
+    function extendedCell(char: string, style: UnderlineStyle): CellData {
+      const cell = createCellData(2, char, 1);
+      cell.bg |= BgFlags.HAS_EXTENDED;
+      cell.extended = cell.extended.clone();
+      cell.extended.underlineStyle = style;
+      return cell;
+    }
+
+    it('does not allocate sparse maps for plain lines, copies or clones', () => {
+      const line = new TestBufferLine(4);
+      line.setCell(0, createCellData(1, 'a', 1));
+      const copy = new TestBufferLine(4);
+      copy.copyFrom(line);
+      const clone = line.clone();
+      for (const l of [line, copy, clone]) {
+        assert.deepEqual(Object.keys((l as any)._combined), []);
+        assert.isUndefined((l as any)._extendedAttrs);
+      }
+      assert.strictEqual(line.combined, copy.combined, 'plain lines share the empty map');
+      assert.strictEqual(line.combined, (clone as any)._combined, 'plain lines share the empty map');
+    });
+
+    it('never leaks combined writes between lines that shared the empty map', () => {
+      const a = new TestBufferLine(4);
+      const b = new TestBufferLine(4);
+      b.copyFrom(a);
+      a.setCell(0, createCellData(1, 'ab', 1));
+      assert.equal(a.getString(0), 'ab');
+      assert.equal(b.getString(0), '');
+      b.copyFrom(a);
+      a.setCell(0, createCellData(1, 'cd', 1));
+      assert.equal(b.getString(0), 'ab');
+      assert.notStrictEqual(a.combined, b.combined);
+    });
+
+    it('drops stale sparse entries when copying', () => {
+      const a = new TestBufferLine(4);
+      a.setCell(0, createCellData(1, 'ab', 1));
+      a.setCell(1, extendedCell('x', UnderlineStyle.CURLY));
+      a.setCell(0, createCellData(1, 'y', 1));
+      a.setCell(1, createCellData(1, 'z', 1));
+      const b = new TestBufferLine(4);
+      b.copyFrom(a);
+      assert.deepEqual(Object.keys(b.combined), []);
+      assert.isUndefined((b as any)._extendedAttrs);
+      assert.equal(b.getString(0), 'y');
+      assert.equal(b.getString(1), 'z');
+    });
+
+    it('moves combined and extended data with insertCells and deleteCells', () => {
+      const line = new TestBufferLine(6);
+      line.setCell(0, createCellData(1, 'a', 1));
+      line.setCell(1, createCellData(1, 'bc', 1));
+      line.setCell(2, extendedCell('x', UnderlineStyle.CURLY));
+      line.insertCells(0, 2, NULL_CELL_DATA);
+      assert.equal(line.translateToString(true), '  abcx');
+      assert.equal(line.getString(3), 'bc');
+      assert.equal(line.getExtended(4).underlineStyle, UnderlineStyle.CURLY);
+      assert.equal(line.getFg(2), 1);
+      line.deleteCells(0, 3, NULL_CELL_DATA);
+      assert.equal(line.translateToString(true), 'bcx');
+      assert.equal(line.getString(0), 'bc');
+      assert.equal(line.getExtended(1).underlineStyle, UnderlineStyle.CURLY);
+      assert.equal(line.getExtended(2).underlineStyle, UnderlineStyle.NONE);
+    });
+
+    it('fills ranges with extended attributes', () => {
+      const fill = extendedCell('', UnderlineStyle.DOUBLE);
+      const line = new TestBufferLine(5, fill);
+      for (let i = 0; i < 5; i++) {
+        assert.equal(line.getExtended(i).underlineStyle, UnderlineStyle.DOUBLE);
+      }
+      line.fill(NULL_CELL_DATA);
+      assert.isUndefined((line as any)._extendedAttrs);
+      line.replaceCells(1, 3, fill);
+      assert.equal(line.getExtended(0).underlineStyle, UnderlineStyle.NONE);
+      assert.equal(line.getExtended(1).underlineStyle, UnderlineStyle.DOUBLE);
+      assert.equal(line.getExtended(2).underlineStyle, UnderlineStyle.DOUBLE);
+      assert.equal(line.getExtended(3).underlineStyle, UnderlineStyle.NONE);
+      line.resize(7, fill);
+      assert.equal(line.getExtended(6).underlineStyle, UnderlineStyle.DOUBLE);
+    });
+
+    it('keeps the last-used style cache valid across table resets', () => {
+      const line = new TestBufferLine(4);
+      line.setCell(0, createCellData(5, 'a', 1));
+      line.fill(NULL_CELL_DATA);
+      line.setCell(1, createCellData(6, 'b', 1));
+      line.setCell(2, createCellData(5, 'c', 1));
+      assert.equal(line.getFg(1), 6);
+      assert.equal(line.getFg(2), 5);
+      const src = new TestBufferLine(4);
+      src.setCell(0, createCellData(7, 'd', 1));
+      line.copyFrom(src);
+      line.setCell(3, createCellData(5, 'e', 1));
+      assert.equal(line.getFg(0), 7);
+      assert.equal(line.getFg(3), 5);
+    });
+  });
+
   describe('interned styles', () => {
     it('bounds style retention during repeated truecolor repainting without losing live styles', () => {
       const line = new TestBufferLine(4);

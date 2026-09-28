@@ -413,6 +413,11 @@ class WebgpuGlyphRenderer extends Disposable implements IGlyphRenderer {
     this._dirtyRows[y] = 1;
   }
 
+  public copyRows(src: number, dest: number, count: number): void {
+    this._model.copyRows(src, dest, count);
+    this._dirtyRows.fill(1, dest, dest + count);
+  }
+
   public clear(): void {
     this._model.clear();
     this._markAllDirty();
