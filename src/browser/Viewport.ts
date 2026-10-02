@@ -24,6 +24,7 @@ export class Viewport extends Disposable {
 
   private _queuedAnimationFrame?: number;
   private _latestYDisp?: number;
+  private _pendingYDisp?: number;
   private _isSyncing: boolean = false;
   private _isHandlingScroll: boolean = false;
   private _suppressOnScrollHandler: boolean = false;
@@ -102,18 +103,18 @@ export class Viewport extends Disposable {
       // Reset _latestYDisp when switching buffers to prevent stale scroll position
       // from alt buffer contaminating normal buffer scroll position
       this._latestYDisp = undefined;
+      this._pendingYDisp = undefined;
       this.queueSync();
     }));
-    this._register(this._bufferService.onScroll(() => this._sync()));
+    // Emulation still processes every scroll synchronously. Only scrollbar/DOM
+    // updates are coalesced with the frame that presents the resulting buffer.
+    this._register(this._bufferService.onScroll(() => this.queueSync(this._bufferService.buffer.ydisp)));
 
     // Flush deferred viewport sync after a render completes (e.g. after ESU ends
     // synchronized output mode). This ensures DOM scroll position updates atomically
     // with the canvas render.
     this._register(this._renderService.onRender(() => {
-      if (this._needsSyncOnRender) {
-        this._needsSyncOnRender = false;
-        this._sync();
-      }
+      this._syncOnRender();
     }));
 
     this._register(this._scrollableElement.onScroll(e => this._handleScroll(e)));
@@ -121,6 +122,7 @@ export class Viewport extends Disposable {
   }
 
   public scrollLines(disp: number): void {
+    this._flushPendingSync();
     const pos = this._scrollableElement.getScrollPosition();
     this._scrollableElement.setScrollPosition({
       reuseAnimation: true,
@@ -129,6 +131,7 @@ export class Viewport extends Disposable {
   }
 
   public scrollToLine(line: number, disableSmoothScroll?: boolean): void {
+    this._flushPendingSync();
     if (disableSmoothScroll) {
       this._latestYDisp = line;
     }
@@ -154,9 +157,12 @@ export class Viewport extends Disposable {
   }
 
   public queueSync(ydisp?: number): void {
-    // Update state
-    if (ydisp !== undefined) {
-      this._latestYDisp = ydisp;
+    // Resizes/reflow can change ydisp without a scroll notification. A sync
+    // without an explicit target must replace any older queued output position.
+    this._pendingYDisp = ydisp ?? this._bufferService.buffer.ydisp;
+    if (this._coreService.decPrivateModes.synchronizedOutput) {
+      this._needsSyncOnRender = true;
+      return;
     }
 
     // Don't queue more than one callback
@@ -165,8 +171,26 @@ export class Viewport extends Disposable {
     }
     this._queuedAnimationFrame = this._renderService.addRefreshCallback(() => {
       this._queuedAnimationFrame = undefined;
-      this._sync(this._latestYDisp);
+      const ydisp = this._pendingYDisp;
+      this._pendingYDisp = undefined;
+      this._sync(ydisp);
     });
+  }
+
+  private _flushPendingSync(): void {
+    if (this._queuedAnimationFrame !== undefined) {
+      const ydisp = this._pendingYDisp;
+      this._pendingYDisp = undefined;
+      this._sync(ydisp);
+    }
+  }
+
+  private _syncOnRender(): void {
+    if (this._needsSyncOnRender) {
+      this._needsSyncOnRender = false;
+      this._pendingYDisp = undefined;
+      this._sync();
+    }
   }
 
   private _sync(ydisp: number = this._bufferService.buffer.ydisp): void {
@@ -213,6 +237,9 @@ export class Viewport extends Disposable {
     const diff = newRow - this._bufferService.buffer.ydisp;
     if (diff !== 0) {
       this._latestYDisp = newRow;
+      // User scrolling may suppress the BufferService scroll event. An older
+      // queued output update must not restore the pre-interaction position.
+      if (this._queuedAnimationFrame !== undefined) this._pendingYDisp = newRow;
       this._onRequestScrollLines.fire(diff);
     }
     this._isHandlingScroll = false;

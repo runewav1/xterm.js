@@ -15,7 +15,7 @@ import { BufferLine, DEFAULT_ATTR_DATA } from './buffer/BufferLine';
 import { IParsingState, IEscapeSequenceParser, IParams, IFunctionIdentifier } from './parser/Types';
 import { NULL_CELL_CODE, NULL_CELL_WIDTH, Attributes, FgFlags, BgFlags, Content, UnderlineStyle } from './buffer/Constants';
 import { CellData } from './buffer/CellData';
-import { AttributeData } from './buffer/AttributeData';
+import { SINGLE_UNDERLINE_ATTRS } from './buffer/AttributeData';
 import { ICoreService, IBufferService, IOptionsService, ILogService, IMouseStateService, ICharsetService, IUnicodeService, LogLevelEnum, IOscLinkService } from './services/Services';
 import { UnicodeService } from './services/UnicodeService';
 import { OscHandler } from './parser/OscParser';
@@ -927,7 +927,6 @@ export class InputHandler extends Disposable implements IInputHandler {
       this._activeBuffer.y = y;
     }
     this._restrictCursor();
-    this._dirtyRowTracker.markDirty(this._activeBuffer.y);
   }
 
   /**
@@ -2423,7 +2422,7 @@ export class InputHandler extends Disposable implements IInputHandler {
     if (mode === 2) {
       color |= Attributes.CM_RGB;
       color &= ~Attributes.RGB_MASK;
-      color |= AttributeData.fromColorRGB([c1, c2, c3]);
+      color |= (c1 & 255) << Attributes.RED_SHIFT | (c2 & 255) << Attributes.GREEN_SHIFT | c3 & 255;
     } else if (mode === 5) {
       color &= ~(Attributes.CM_MASK | Attributes.RGB_MASK);
       color |= Attributes.CM_P256 | (c1 & 0xff);
@@ -2436,6 +2435,37 @@ export class InputHandler extends Disposable implements IInputHandler {
    * Returns advance for params index.
    */
   private _extractColor(params: IParams, pos: number, attr: IAttributeData): number {
+    // Complete semicolon FG/BG colors don't need the general color-space /
+    // subparameter normalization below. Leave mixed, incomplete and underline
+    // color sequences on that path, including -1 placeholders supplied via Params.
+    const target = params.params[pos];
+    if ((target === 38 || target === 48) && pos + 2 < params.length &&
+        !params.hasSubParams(pos) && !params.hasSubParams(pos + 1) && !params.hasSubParams(pos + 2)) {
+      const mode = params.params[pos + 1];
+      const c1 = params.params[pos + 2];
+      if (mode === 5 && c1 >= 0) {
+        if (target === 38) {
+          attr.fg = this._updateAttrColor(attr.fg, mode, c1, 0, 0);
+        } else {
+          attr.bg = this._updateAttrColor(attr.bg, mode, c1, 0, 0);
+        }
+        return 2;
+      }
+      if (mode === 2 && pos + 4 < params.length && c1 >= 0 &&
+          !params.hasSubParams(pos + 3) && !params.hasSubParams(pos + 4)) {
+        const c2 = params.params[pos + 3];
+        const c3 = params.params[pos + 4];
+        if (c2 >= 0 && c3 >= 0) {
+          if (target === 38) {
+            attr.fg = this._updateAttrColor(attr.fg, mode, c1, c2, c3);
+          } else {
+            attr.bg = this._updateAttrColor(attr.bg, mode, c1, c2, c3);
+          }
+          return 4;
+        }
+      }
+    }
+
     // normalize params
     // meaning: [target, CM, ign, val, val, val]
     // RGB    : [ 38/48,  2, ign,   r,   g,   b]
@@ -2505,15 +2535,30 @@ export class InputHandler extends Disposable implements IInputHandler {
    *    4:5   -   dashed underline
    */
   private _processUnderline(style: number, attr: IAttributeData): void {
-    // treat extended attrs as immutable, thus always clone from old one
-    // this is needed since the buffer only holds references to it
-    attr.extended = attr.extended.clone();
-
     // default to 1 == single underline
     if (!~style || style > 5) {
       style = 1;
     }
-    attr.extended.underlineStyle = style;
+    if (style === UnderlineStyle.SINGLE) {
+      const extended = attr.extended;
+      if (extended === SINGLE_UNDERLINE_ATTRS ||
+          (!extended.urlId && extended.payload === undefined &&
+            (extended.ext === 0 || extended.ext === SINGLE_UNDERLINE_ATTRS.ext))) {
+        // Keep the same attribute words/renderer semantics, but let BufferLine
+        // derive this common immutable descriptor rather than store it per cell.
+        attr.extended = SINGLE_UNDERLINE_ATTRS;
+        attr.fg |= FgFlags.UNDERLINE;
+        attr.bg |= BgFlags.HAS_EXTENDED;
+        return;
+      }
+    }
+    // Buffer cells retain references to extended attrs: clone before changing
+    // them, but reuse an unchanged style. URL underlineStyle is an effective
+    // override, not the stored style, so links keep the original clone path.
+    if (attr.extended.urlId || attr.extended.payload !== undefined || attr.extended.underlineStyle !== style) {
+      attr.extended = attr.extended.clone();
+      attr.extended.underlineStyle = style;
+    }
     attr.fg |= FgFlags.UNDERLINE;
 
     // 0 deactivates underline

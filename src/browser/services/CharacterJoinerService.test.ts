@@ -133,6 +133,32 @@ describe('CharacterJoinerService', () => {
     );
   });
 
+  it('does not materialize text for single-cell style runs', () => {
+    const bufferService = new MockBufferService(4, 1);
+    const line = lineData([['a', 1], ['b', 2], ['c', 1], ['d', 2]]);
+    bufferService.buffer.lines.set(0, line);
+    line.translateToString = () => { throw new Error('no joinable run needs a string'); };
+    const joiner = new CharacterJoinerService(bufferService);
+    joiner.register(() => { throw new Error('single-cell runs must not reach the joiner'); });
+    assert.deepEqual(joiner.getJoinedCharacters(0), []);
+  });
+
+  it('materializes text once when later style runs are joinable', () => {
+    const bufferService = new MockBufferService(6, 1);
+    const line = lineData([['x', 1], ['->', 2], ['y', 3], ['->', 4]]);
+    bufferService.buffer.lines.set(0, line);
+    const translate = line.translateToString.bind(line);
+    let translations = 0;
+    line.translateToString = (...args) => {
+      translations++;
+      return translate(...args);
+    };
+    const joiner = new CharacterJoinerService(bufferService);
+    joiner.register(substringJoiner('->'));
+    assert.deepEqual(joiner.getJoinedCharacters(0), [[1, 3], [4, 6]]);
+    assert.equal(translations, 1);
+  });
+
   it('handles ranges that extend all the way to the end of the line', () => {
     service.register(substringJoiner('-> d'));
     assert.deepEqual(

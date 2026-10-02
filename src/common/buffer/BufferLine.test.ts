@@ -7,7 +7,7 @@ import { BufferLine } from './BufferLine';
 import { CellData } from './CellData';
 import { CharData, IBufferLine, ICellData } from './Types';
 import { assert } from 'chai';
-import { AttributeData } from './AttributeData';
+import { AttributeData, SINGLE_UNDERLINE_ATTRS } from './AttributeData';
 import { createCellData, NULL_CELL_DATA, extendedAttributes } from '../TestUtils.test';
 
 
@@ -906,6 +906,50 @@ describe('BufferLine', function(): void {
   });
 
   describe('lazy sparse maps', () => {
+    it('derives shared single underline through fills, moves, resize and copies', () => {
+      const cell = createCellData(FgFlags.UNDERLINE | FgFlags.BOLD, 'x', 1);
+      cell.bg = BgFlags.HAS_EXTENDED | BgFlags.ITALIC;
+      cell.extended = SINGLE_UNDERLINE_ATTRS;
+      const line = new TestBufferLine(4, cell);
+      line.insertCells(1, 1, cell);
+      line.deleteCells(2, 1, cell);
+      line.resize(6, cell);
+      const copied = new TestBufferLine(6);
+      copied.copyFrom(line);
+      for (const candidate of [line, line.clone(), copied]) {
+        assert.isUndefined((candidate as any)._extendedAttrs);
+        for (let x = 0; x < candidate.length; x++) {
+          assert.strictEqual(candidate.getExtended(x), SINGLE_UNDERLINE_ATTRS);
+          const loaded = candidate.loadCell(x, new CellData());
+          assert.equal(loaded.getUnderlineStyle(), UnderlineStyle.SINGLE);
+          assert.equal(loaded.fg, cell.fg);
+          assert.equal(loaded.bg, cell.bg);
+        }
+      }
+      const mutable = SINGLE_UNDERLINE_ATTRS.clone();
+      mutable.underlineStyle = UnderlineStyle.CURLY;
+      assert.equal(SINGLE_UNDERLINE_ATTRS.underlineStyle, UnderlineStyle.SINGLE);
+    });
+
+    it('clears old extended entries when writing or copying derived single underline', () => {
+      const ordinary = createCellData(FgFlags.UNDERLINE, 'x', 1);
+      ordinary.bg = BgFlags.HAS_EXTENDED;
+      ordinary.extended = SINGLE_UNDERLINE_ATTRS;
+      const complex = createCellData(FgFlags.UNDERLINE, 'y', 1);
+      complex.bg = BgFlags.HAS_EXTENDED;
+      complex.extended.underlineStyle = UnderlineStyle.CURLY;
+      complex.extended.underlineColor = Attributes.CM_P256 | 123;
+      const line = new TestBufferLine(4, complex);
+      line.setCell(0, ordinary);
+      line.setCellFromCodepoint(1, 120, 1, ordinary);
+      line.replaceCells(2, 4, ordinary);
+      for (let x = 0; x < 4; x++) assert.strictEqual(line.getExtended(x), SINGLE_UNDERLINE_ATTRS);
+      line.fill(complex);
+      const src = new TestBufferLine(4, ordinary);
+      line.copyCellsFrom(src, 0, 0, 4, false);
+      for (let x = 0; x < 4; x++) assert.strictEqual(line.getExtended(x), SINGLE_UNDERLINE_ATTRS);
+      assert.isUndefined((line.clone() as any)._extendedAttrs);
+    });
     function extendedCell(char: string, style: UnderlineStyle): CellData {
       const cell = createCellData(2, char, 1);
       cell.bg |= BgFlags.HAS_EXTENDED;
@@ -1061,6 +1105,55 @@ describe('BufferLine', function(): void {
       for (let x = 0; x < 30; x++) {
         assert.equal(line.getFg(x), 1);
         assert.equal(line.getBg(x), x + 1);
+      }
+    });
+
+    it('stores unique foreground pairs inline and promotes only on a second background', () => {
+      const line = new TestBufferLine(64);
+      for (let x = 0; x < 30; x++) {
+        const cell = createCellData(x + 1, 'a', 1);
+        cell.bg = x + 100;
+        line.setCell(x, cell);
+      }
+      const index = (line as any)._styleIndex as Map<number, number | Map<number, number>>;
+      for (let fg = 1; fg <= 30; fg++) {
+        assert.isNumber(index.get(fg), 'one background should not allocate an inner Map');
+      }
+      const originalId = index.get(7) as number;
+      const cell = createCellData(7, 'b', 1);
+      cell.bg = 999;
+      line.setCell(30, cell);
+      const backgrounds = index.get(7) as Map<number, number>;
+      assert.instanceOf(backgrounds, Map);
+      assert.equal(backgrounds.get(106), originalId);
+      assert.notEqual(backgrounds.get(999), originalId);
+      cell.bg = 106;
+      line.setCell(31, cell);
+      assert.equal((line as any)._styleIds[31], originalId);
+      assert.equal(line.getBg(6), 106);
+      assert.equal(line.getBg(30), 999);
+      assert.isNumber(index.get(8), 'promotion must not affect unrelated foregrounds');
+    });
+
+    it('rebuilds mixed inline and promoted entries after cloning and compaction', () => {
+      const line = new TestBufferLine(64);
+      for (let x = 0; x < 30; x++) {
+        const cell = createCellData(x < 10 ? 1 : x + 1, 'a', 1);
+        cell.bg = x + 100;
+        line.setCell(x, cell);
+      }
+      for (const target of [line.clone() as TestBufferLine, line]) {
+        (target as any)._compactStyles();
+        const cell = createCellData(1, 'b', 1);
+        cell.bg = 100;
+        target.setCell(30, cell);
+        assert.equal((target as any)._styleIds[30], (target as any)._styleIds[0]);
+        const index = (target as any)._styleIndex as Map<number, number | Map<number, number>>;
+        assert.instanceOf(index.get(1), Map);
+        assert.isNumber(index.get(11));
+        for (let x = 0; x < 30; x++) {
+          assert.equal(target.getBg(x), x + 100);
+        }
       }
     });
 

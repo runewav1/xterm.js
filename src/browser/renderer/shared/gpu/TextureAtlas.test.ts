@@ -4,8 +4,8 @@
  */
 
 import { assert } from 'chai';
-import { TextureAtlas } from './TextureAtlas';
-import { ICharAtlasConfig, IDirtyRect, IRasterizedGlyph } from './Types';
+import { TextureAtlas, clearColor, checkCompletelyTransparent } from './TextureAtlas';
+import { IBoundingBox, ICharAtlasConfig, IDirtyRect, IRasterizedGlyph } from './Types';
 import { MockLogService, MockUnicodeService } from '../../../../common/TestUtils.test';
 import { FgFlags } from '../../../../common/buffer/Constants';
 
@@ -29,7 +29,8 @@ describe('TextureAtlas lifecycle', () => {
       }
     } as unknown as Document;
     atlas = new TextureAtlas(document, {
-      deviceCellWidth: 10, deviceCellHeight: 20, maxTextureSize: 4096, maxAtlasPages: 16
+      deviceCellWidth: 10, deviceCellHeight: 20, deviceCharWidth: 8, deviceCharHeight: 18,
+      lineHeight: 1, maxTextureSize: 4096, maxAtlasPages: 16
     } as ICharAtlasConfig, new MockUnicodeService(), new MockLogService());
   });
 
@@ -136,5 +137,105 @@ describe('TextureAtlas lifecycle', () => {
     assert.equal(atlas.pages.length, 0);
     assert.ok(canvases.every(c => c.width === 0 && c.height === 0));
     assert.equal(saves, 0);
+  });
+
+  it('preserves asymmetric glyph bounds while reading pixel data once', () => {
+    const findBounds = (atlas as any)._findGlyphBoundingBox as (
+      image: ImageData, bounds: IBoundingBox, width: number, restricted: boolean, custom: boolean, padding: number
+    ) => IRasterizedGlyph;
+    const canvasWidth = canvases[1].width;
+    const canvasHeight = canvases[1].height;
+    let seed = 12345;
+    for (const restricted of [false, true]) {
+      for (const custom of [false, true]) {
+        for (let trial = 0; trial < 32; trial++) {
+          const pixels = new Uint8ClampedArray(canvasWidth * canvasHeight * 4);
+          for (let pixel = 0; pixel < (trial === 0 ? 0 : 8); pixel++) {
+            seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+            const offset = (seed % (canvasWidth * canvasHeight)) * 4;
+            pixels[offset + 3] = 1 + (seed % 255);
+          }
+          let reads = 0;
+          const image = {
+            get data(): Uint8ClampedArray { reads++; return pixels; }
+          } as ImageData;
+          const padding = 4;
+          const width = restricted ? 10 : 24;
+          const height = restricted ? 20 : canvasHeight;
+          // Independent full-region reference. The original searches top/bottom
+          // without padding, left with padding, and right starting at padding.
+          let top = height;
+          let bottom = -1;
+          let left = padding + width;
+          let right = -1;
+          for (let y = 0; y < height; y++) {
+            for (let x = 0; x < padding + width; x++) {
+              if (pixels[(y * canvasWidth + x) * 4 + 3] !== 0) {
+                left = Math.min(left, x);
+                if (x >= padding) right = Math.max(right, x);
+                if (x < width) {
+                  top = Math.min(top, y);
+                  bottom = Math.max(bottom, y);
+                }
+              }
+            }
+          }
+          const expected = {
+            top: top === height ? 0 : top,
+            bottom: bottom === -1 ? height : bottom,
+            left: left === padding + width ? 0 : left,
+            right: right === -1 ? width : right
+          };
+          const bounds = { top: 0, bottom: 0, left: 0, right: 0 };
+          const glyph = findBounds.call(atlas, image, bounds, 24, restricted, custom, padding);
+          assert.deepEqual(bounds, expected);
+          assert.deepEqual(glyph.size, { x: expected.right - expected.left + 1, y: expected.bottom - expected.top + 1 });
+          assert.deepEqual(glyph.offset, { x: -expected.left + padding + (restricted || custom ? 1 : 0), y: -expected.top + padding });
+          assert.equal(reads, 1);
+        }
+      }
+    }
+  });
+});
+
+describe('glyph pixel processing', () => {
+  it('preserves exact and threshold color clearing with one data getter read', () => {
+    const bg = { rgba: 0x64788CFF, css: '#64788c' };
+    const fg = { rgba: 0xDCF0FAFF, css: '#dcf0fa' };
+    for (const threshold of [false, true]) {
+      const pixels = new Uint8ClampedArray([
+        100, 120, 140, 255,
+        101, 121, 141, 128,
+        220, 240, 250, 255,
+        110, 130, 150, 64,
+        100, 120, 140, 0
+      ]);
+      let reads = 0;
+      const image = {
+        get data(): Uint8ClampedArray { reads++; return pixels; }
+      } as ImageData;
+      assert.isFalse(clearColor(image, bg, fg, threshold));
+      assert.deepEqual(Array.from(pixels), [
+        100, 120, 140, 0,
+        101, 121, 141, threshold ? 0 : 128,
+        220, 240, 250, 255,
+        110, 130, 150, 64,
+        100, 120, 140, 0
+      ]);
+      assert.equal(reads, 1);
+    }
+  });
+
+  it('checks transparency using alpha only with one data getter read', () => {
+    const pixels = new Uint8ClampedArray([255, 255, 255, 0, 1, 2, 3, 0]);
+    let reads = 0;
+    const image = {
+      get data(): Uint8ClampedArray { reads++; return pixels; }
+    } as ImageData;
+    assert.isTrue(checkCompletelyTransparent(image));
+    assert.equal(reads, 1);
+    pixels[7] = 1;
+    assert.isFalse(checkCompletelyTransparent(image));
+    assert.equal(reads, 2);
   });
 });

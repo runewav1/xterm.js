@@ -981,6 +981,28 @@ describe('InputHandler', () => {
       await inputHandler.parseP(`\x1b[38;2;5m`);
       assert.deepEqual(AttributeData.toColorRGB(inputHandler.curAttrData.getFgColor()), [5, 0, 0]);
     });
+    it('preserves dense-cell colors and flags at every chunk boundary', async () => {
+      for (const sgr of [
+        '\x1b[38;5;200;48;5;355;1;3;4m',
+        '\x1b[1;38;2;256;511;300;48;2;4;5;6;3;4m',
+        '\x1b[38;5;;48;2;;;1;3;4m'
+      ]) {
+        await inputHandler.parseP('\x1b[0m' + sgr);
+        const expected = inputHandler.curAttrData.clone();
+        for (let split = 1; split < sgr.length; split++) {
+          await inputHandler.parseP('\x1b[0m');
+          await inputHandler.parseP(sgr.slice(0, split));
+          await inputHandler.parseP(sgr.slice(split));
+          assert.deepEqual(inputHandler.curAttrData, expected, `split ${split} of ${JSON.stringify(sgr)}`);
+        }
+      }
+    });
+    it('normalizes negative color placeholders through the general path', () => {
+      inputHandler.charAttributes(Params.fromArray([38, 5, -1, 48, 2, -1, 2, 3, 1]));
+      assert.equal(inputHandler.curAttrData.getFgColor(), 0);
+      assert.equal(inputHandler.curAttrData.getBgColor(), 0x000203);
+      assert.isTrue(!!inputHandler.curAttrData.isBold());
+    });
   });
   describe('colon notation', () => {
     let inputHandler2: TestInputHandler;
@@ -988,6 +1010,23 @@ describe('InputHandler', () => {
       inputHandler2 = new TestInputHandler(bufferService, new MockCharsetService(), coreService, new MockLogService(), optionsService, new MockOscLinkService(), new MockMouseStateService(), new MockUnicodeService());
     });
     describe('should equal to semicolon', () => {
+      it('preserves unrelated attribute bits and links in the color fast paths', async () => {
+        for (const [semicolon, colon] of [
+          ['38;5;355', '38:5:355'],
+          ['48;5;2147483647', '48:5:2147483647'],
+          ['38;2;256;511;300', '38:2::256:511:300'],
+          ['48;2;1;2;3', '48:2::1:2:3']
+        ]) {
+          inputHandler.curAttrData.fg = inputHandler.curAttrData.bg = 0xFFFFFFFF;
+          inputHandler2.curAttrData.fg = inputHandler2.curAttrData.bg = 0xFFFFFFFF;
+          inputHandler.curAttrData.extended.urlId = 123;
+          inputHandler2.curAttrData.extended.urlId = 123;
+          await inputHandler.parseP(`\x1b[${semicolon}m`);
+          await inputHandler2.parseP(`\x1b[${colon}m`);
+          assert.deepEqual(inputHandler.curAttrData, inputHandler2.curAttrData);
+          assert.equal(inputHandler.curAttrData.extended.urlId, 123);
+        }
+      });
       it('CSI 38:2::50:100:150 m', async () => {
         inputHandler.curAttrData.fg = 0xFFFFFFFF;
         inputHandler2.curAttrData.fg = 0xFFFFFFFF;
@@ -1133,6 +1172,16 @@ describe('InputHandler', () => {
   describe('cursor positioning', () => {
     beforeEach(() => {
       bufferService.resize(10, 10);
+    });
+    it('refreshes the old and new cursor rows after absolute positioning', async () => {
+      await inputHandler.parseP('\x1b[5;5H');
+      const ranges: { start: number, end: number }[] = [];
+      const subscription = inputHandler.onRequestRefreshRows(range => {
+        if (range) ranges.push(range);
+      });
+      await inputHandler.parseP('\x1b[7;7H');
+      subscription.dispose();
+      assert.deepEqual(ranges, [{ start: 4, end: 6 }]);
     });
     it('cursor forward (CUF)', async () => {
       await inputHandler.parseP('\x1b[C');
@@ -1953,6 +2002,40 @@ describe('InputHandler', () => {
   describe('extended underline style support (SGR 4)', () => {
     beforeEach(() => {
       bufferService.resize(10, 5);
+    });
+    it('shares unchanged underline attrs but clones before changing stored cells', async () => {
+      await inputHandler.parseP('\x1b[4mA');
+      const line = bufferService.buffer.lines.get(0)!;
+      const original = line.getExtended(0);
+      await inputHandler.parseP('\x1b[38;5;200;4mB');
+      assert.strictEqual(line.getExtended(1), original);
+      assert.isTrue(Object.isFrozen(original));
+      assert.isUndefined((line as any)._extendedAttrs, 'plain single underline needs no per-cell side map');
+      await inputHandler.parseP('\x1b[58;5;123mC\x1b[4:2mD');
+      assert.equal(original.underlineStyle, UnderlineStyle.SINGLE);
+      assert.equal(original.underlineColor, 0);
+      assert.notStrictEqual(line.getExtended(2), original);
+      assert.equal(line.getExtended(2).underlineStyle, UnderlineStyle.SINGLE);
+      assert.equal(line.getExtended(3).underlineStyle, UnderlineStyle.DOUBLE);
+    });
+    it('still updates the underline flag when the stored style is unchanged', async () => {
+      await inputHandler.parseP('\x1b[4:0m');
+      const original = inputHandler.curAttrData.extended;
+      await inputHandler.parseP('\x1b[4:0m');
+      assert.strictEqual(inputHandler.curAttrData.extended, original);
+      assert.isFalse(!!inputHandler.curAttrData.isUnderline());
+      assert.equal(inputHandler.curAttrData.getUnderlineStyle(), UnderlineStyle.NONE);
+    });
+    it('does not confuse hyperlink underline overrides with the stored style', async () => {
+      await inputHandler.parseP('\x1b[4m\x1b]8;;https://example.com\x1b\\A');
+      const original = bufferService.buffer.lines.get(0)!.getExtended(0);
+      assert.equal(original.underlineStyle, UnderlineStyle.DASHED);
+      await inputHandler.parseP('\x1b[4:5m\x1b]8;;\x1b\\B');
+      assert.equal(inputHandler.curAttrData.getUnderlineStyle(), UnderlineStyle.DASHED);
+      assert.equal(original.underlineStyle, UnderlineStyle.DASHED);
+      const withoutLink = original.clone();
+      withoutLink.urlId = 0;
+      assert.equal(withoutLink.underlineStyle, UnderlineStyle.SINGLE);
     });
     it('4 | 24', async () => {
       await inputHandler.parseP('\x1b[4m');

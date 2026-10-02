@@ -3,6 +3,15 @@
  * @license MIT
  */
 
+// Clock availability is fixed for a terminal runtime. Resolve and bind once:
+// repeatedly looking up the browser's global Performance object is expensive
+// when an input stream explicitly positions the cursor before every character.
+const getTimestamp = createMonotonicClock(typeof performance === 'undefined' ? undefined : performance);
+
+export function createMonotonicClock(clock?: Pick<Performance, 'now'>): () => number {
+  return typeof clock?.now === 'function' ? clock.now.bind(clock) : Date.now;
+}
+
 /**
  * Returns a monotonically increasing timestamp in milliseconds. `performance.now`
  * is preferred because it is not affected by wall-clock adjustments; `Date.now`
@@ -13,7 +22,5 @@
  * directly comparable.
  */
 export function monotonicNow(): number {
-  return typeof performance !== 'undefined' && typeof performance.now === 'function'
-    ? performance.now()
-    : Date.now();
+  return getTimestamp();
 }

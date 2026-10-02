@@ -211,3 +211,6 @@ export class ExtendedAttrs implements IExtendedAttrs {
     return this.underlineStyle === UnderlineStyle.NONE && this._urlId === 0 && this.payload === undefined;
   }
 }
+
+/** Immutable ordinary single underline, with foreground-derived color and no link/payload. */
+export const SINGLE_UNDERLINE_ATTRS: IExtendedAttrs = Object.freeze(new ExtendedAttrs(UnderlineStyle.SINGLE << 26));

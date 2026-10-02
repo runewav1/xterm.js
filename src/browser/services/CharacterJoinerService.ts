@@ -99,7 +99,9 @@ export class CharacterJoinerService implements ICharacterJoinerService {
     }
 
     const ranges: [number, number][] = [];
-    const lineStr = line.translateToString(true);
+    // Style-heavy lines may have no joinable runs at all. Materialize their
+    // text only if a multi-column same-style run actually reaches a joiner.
+    let lineStr: string | undefined;
     const trimmedLength = line.getTrimmedLength();
 
     // Because some cells can be represented by multiple javascript characters,
@@ -126,7 +128,7 @@ export class CharacterJoinerService implements ICharacterJoinerService {
         // look for ranges to join.
         if (x - rangeStartColumn > 1) {
           const joinedRanges = this._getJoinedRanges(
-            lineStr,
+            lineStr ??= line.translateToString(true),
             rangeStartStringIndex,
             currentStringIndex,
             line,
@@ -150,7 +152,7 @@ export class CharacterJoinerService implements ICharacterJoinerService {
     // Process any trailing ranges.
     if (trimmedLength - rangeStartColumn > 1) {
       const joinedRanges = this._getJoinedRanges(
-        lineStr,
+        lineStr ??= line.translateToString(true),
         rangeStartStringIndex,
         currentStringIndex,
         line,

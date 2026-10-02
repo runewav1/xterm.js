@@ -1031,14 +1031,19 @@ export class TextureAtlas implements ITextureAtlas {
    * @param boundingBox An IBoundingBox to put the clipped bounding box values.
    */
   private _findGlyphBoundingBox(imageData: ImageData, boundingBox: IBoundingBox, allowedWidth: number, restrictedGlyph: boolean, customGlyph: boolean, padding: number): IRasterizedGlyph {
+    // Cache host-object getters before scanning. ImageData.data and canvas.width
+    // are stable for this glyph, but reading them for each pixel crosses the
+    // browser binding repeatedly (especially costly for styled atlas misses).
+    const data = imageData.data;
+    const stride = this._tmpCanvas.width * 4;
     boundingBox.top = 0;
     const height = restrictedGlyph ? this._config.deviceCellHeight : this._tmpCanvas.height;
     const width = restrictedGlyph ? this._config.deviceCellWidth : allowedWidth;
     let found = false;
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
-        const alphaOffset = y * this._tmpCanvas.width * 4 + x * 4 + 3;
-        if (imageData.data[alphaOffset] !== 0) {
+        const alphaOffset = y * stride + x * 4 + 3;
+        if (data[alphaOffset] !== 0) {
           boundingBox.top = y;
           found = true;
           break;
@@ -1052,8 +1057,8 @@ export class TextureAtlas implements ITextureAtlas {
     found = false;
     for (let x = 0; x < padding + width; x++) {
       for (let y = 0; y < height; y++) {
-        const alphaOffset = y * this._tmpCanvas.width * 4 + x * 4 + 3;
-        if (imageData.data[alphaOffset] !== 0) {
+        const alphaOffset = y * stride + x * 4 + 3;
+        if (data[alphaOffset] !== 0) {
           boundingBox.left = x;
           found = true;
           break;
@@ -1067,8 +1072,8 @@ export class TextureAtlas implements ITextureAtlas {
     found = false;
     for (let x = padding + width - 1; x >= padding; x--) {
       for (let y = 0; y < height; y++) {
-        const alphaOffset = y * this._tmpCanvas.width * 4 + x * 4 + 3;
-        if (imageData.data[alphaOffset] !== 0) {
+        const alphaOffset = y * stride + x * 4 + 3;
+        if (data[alphaOffset] !== 0) {
           boundingBox.right = x;
           found = true;
           break;
@@ -1082,8 +1087,8 @@ export class TextureAtlas implements ITextureAtlas {
     found = false;
     for (let y = height - 1; y >= 0; y--) {
       for (let x = 0; x < width; x++) {
-        const alphaOffset = y * this._tmpCanvas.width * 4 + x * 4 + 3;
-        if (imageData.data[alphaOffset] !== 0) {
+        const alphaOffset = y * stride + x * 4 + 3;
+        if (data[alphaOffset] !== 0) {
           boundingBox.bottom = y;
           found = true;
           break;
@@ -1219,7 +1224,8 @@ class AtlasPage {
  * transparent.
  * @returns True if the result is "empty", meaning all pixels are fully transparent.
  */
-function clearColor(imageData: ImageData, bg: IColor, fg: IColor, enableThresholdCheck: boolean): boolean {
+export function clearColor(imageData: ImageData, bg: IColor, fg: IColor, enableThresholdCheck: boolean): boolean {
+  const data = imageData.data;
   // Get color channels
   const r = bg.rgba >>> 24;
   const g = bg.rgba >>> 16 & 0xFF;
@@ -1238,19 +1244,19 @@ function clearColor(imageData: ImageData, bg: IColor, fg: IColor, enableThreshol
 
   // Set alpha channel of relevant pixels to 0
   let isEmpty = true;
-  for (let offset = 0; offset < imageData.data.length; offset += 4) {
+  for (let offset = 0; offset < data.length; offset += 4) {
     // Check exact match
-    if (imageData.data[offset] === r &&
-        imageData.data[offset + 1] === g &&
-        imageData.data[offset + 2] === b) {
-      imageData.data[offset + 3] = 0;
+    if (data[offset] === r &&
+        data[offset + 1] === g &&
+        data[offset + 2] === b) {
+      data[offset + 3] = 0;
     } else {
       // Check the threshold based difference
       if (enableThresholdCheck &&
-          (Math.abs(imageData.data[offset] - r) +
-          Math.abs(imageData.data[offset + 1] - g) +
-          Math.abs(imageData.data[offset + 2] - b)) < threshold) {
-        imageData.data[offset + 3] = 0;
+          (Math.abs(data[offset] - r) +
+          Math.abs(data[offset + 1] - g) +
+          Math.abs(data[offset + 2] - b)) < threshold) {
+        data[offset + 3] = 0;
       } else {
         isEmpty = false;
       }
@@ -1260,9 +1266,10 @@ function clearColor(imageData: ImageData, bg: IColor, fg: IColor, enableThreshol
   return isEmpty;
 }
 
-function checkCompletelyTransparent(imageData: ImageData): boolean {
-  for (let offset = 0; offset < imageData.data.length; offset += 4) {
-    if (imageData.data[offset + 3] > 0) {
+export function checkCompletelyTransparent(imageData: ImageData): boolean {
+  const data = imageData.data;
+  for (let offset = 0; offset < data.length; offset += 4) {
+    if (data[offset + 3] > 0) {
       return false;
     }
   }

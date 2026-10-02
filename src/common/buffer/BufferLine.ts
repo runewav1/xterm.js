@@ -4,7 +4,7 @@
  */
 
 import { CharData, IAttributeData, IBufferLine, ICellData, IExtendedAttrs } from './Types';
-import { AttributeData } from './AttributeData';
+import { AttributeData, SINGLE_UNDERLINE_ATTRS } from './AttributeData';
 import { CellData } from './CellData';
 import { Attributes, BgFlags, CHAR_DATA_ATTR_INDEX, CHAR_DATA_CHAR_INDEX, CHAR_DATA_WIDTH_INDEX, Content, NULL_CELL_CHAR, NULL_CELL_CODE, NULL_CELL_WIDTH, WHITESPACE_CELL_CHAR } from './Constants';
 import { stringFromCodePoint } from '../input/TextDecoder';
@@ -77,8 +77,12 @@ export class BufferLine implements IBufferLine {
   protected _styleFg: number[] = [0];
   /** Interned bg words indexed by style id; index 0 is the implicit default. */
   protected _styleBg: number[] = [0];
-  /** Lazy fg -> bg -> style id index, built once the table outgrows a linear scan. */
-  protected _styleIndex: Map<number, Map<number, number>> | undefined;
+  /**
+   * Lazy fg -> style id index. A foreground with multiple backgrounds promotes
+   * its entry to a bg -> id map; the common unique-pair case needs only one
+   * lookup and no per-foreground Map allocation.
+   */
+  protected _styleIndex: Map<number, number | Map<number, number>> | undefined;
   /**
    * Most recently interned non-default style. Printing a run of text with one
    * SGR state re-interns the same pair per cell; this turns that into a single
@@ -143,9 +147,15 @@ export class BufferLine implements IBufferLine {
       }
     }
     if (cell.bg & BgFlags.HAS_EXTENDED) {
-      const extendedAttrs = this._writableExtendedAttrs();
-      for (let i = start; i < end; i++) {
-        extendedAttrs[i] = cell.extended;
+      if (cell.extended === SINGLE_UNDERLINE_ATTRS) {
+        if (this._extendedAttrs) {
+          for (let i = start; i < end; i++) delete this._extendedAttrs[i];
+        }
+      } else {
+        const extendedAttrs = this._writableExtendedAttrs();
+        for (let i = start; i < end; i++) {
+          extendedAttrs[i] = cell.extended;
+        }
       }
     }
     // Intern before filling: a compaction inside renumbers existing ids.
@@ -220,7 +230,10 @@ export class BufferLine implements IBufferLine {
       return last;
     }
     if (fgs.length > Constants.STYLE_INDEX_THRESHOLD) {
-      const id = (this._styleIndex ??= this._buildStyleIndex()).get(fg)?.get(bg);
+      const entry = (this._styleIndex ??= this._buildStyleIndex()).get(fg);
+      const id = typeof entry === 'number'
+        ? (bgs[entry] === bg ? entry : undefined)
+        : entry?.get(bg);
       if (id !== undefined) {
         return id;
       }
@@ -251,27 +264,31 @@ export class BufferLine implements IBufferLine {
   /** Keep the lazy hash index in step with an appended style. */
   private _indexStyle(fg: number, bg: number, id: number): void {
     if (this._styleIndex) {
-      let byBg = this._styleIndex.get(fg);
-      if (!byBg) {
-        byBg = new Map();
-        this._styleIndex.set(fg, byBg);
+      const entry = this._styleIndex.get(fg);
+      if (entry === undefined) {
+        this._styleIndex.set(fg, id);
+      } else if (typeof entry === 'number') {
+        this._styleIndex.set(fg, new Map([[this._styleBg[entry], entry], [bg, id]]));
+      } else {
+        entry.set(bg, id);
       }
-      byBg.set(bg, id);
     } else if (this._styleFg.length > Constants.STYLE_INDEX_THRESHOLD) {
       this._styleIndex = this._buildStyleIndex();
     }
   }
 
-  private _buildStyleIndex(): Map<number, Map<number, number>> {
-    const index = new Map<number, Map<number, number>>();
+  private _buildStyleIndex(): Map<number, number | Map<number, number>> {
+    const index = new Map<number, number | Map<number, number>>();
     for (let i = 1; i < this._styleFg.length; i++) {
       const fg = this._styleFg[i];
-      let byBg = index.get(fg);
-      if (!byBg) {
-        byBg = new Map();
-        index.set(fg, byBg);
+      const entry = index.get(fg);
+      if (entry === undefined) {
+        index.set(fg, i);
+      } else if (typeof entry === 'number') {
+        index.set(fg, new Map([[this._styleBg[entry], entry], [this._styleBg[i], i]]));
+      } else {
+        entry.set(this._styleBg[i], i);
       }
-      byBg.set(this._styleBg[i], i);
     }
     return index;
   }
@@ -424,6 +441,9 @@ export class BufferLine implements IBufferLine {
       if (extended) {
         return extended;
       }
+      // HAS_EXTENDED is retained for ordinary single underline so consumers
+      // see exactly the same flags/style/color as before, without a side-map slot.
+      return SINGLE_UNDERLINE_ATTRS;
     }
     // Do not mutate cell.extended in place: it may still reference this line's map entry from a
     // prior loadCell into a reused CellData.
@@ -444,7 +464,11 @@ export class BufferLine implements IBufferLine {
       this._writableCombined()[index] = cell.combinedData;
     }
     if (cell.bg & BgFlags.HAS_EXTENDED) {
-      this._writableExtendedAttrs()[index] = cell.extended;
+      if (cell.extended === SINGLE_UNDERLINE_ATTRS) {
+        if (this._extendedAttrs) delete this._extendedAttrs[index];
+      } else {
+        this._writableExtendedAttrs()[index] = cell.extended;
+      }
     }
     this._content[index] = cell.content;
     const styleId = this._internStyle(cell.fg, cell.bg);
@@ -459,7 +483,11 @@ export class BufferLine implements IBufferLine {
   public setCellFromCodepoint(index: number, codePoint: number, width: number, attrs: IAttributeData): void {
     this._cacheValid = false;
     if (attrs.bg & BgFlags.HAS_EXTENDED) {
-      this._writableExtendedAttrs()[index] = attrs.extended;
+      if (attrs.extended === SINGLE_UNDERLINE_ATTRS) {
+        if (this._extendedAttrs) delete this._extendedAttrs[index];
+      } else {
+        this._writableExtendedAttrs()[index] = attrs.extended;
+      }
     }
     this._content[index] = codePoint | (width << Content.WIDTH_SHIFT);
     const styleId = this._internStyle(attrs.fg, attrs.bg);
@@ -880,8 +908,13 @@ export class BufferLine implements IBufferLine {
     if (src._content[srcCol] & Content.IS_COMBINED_MASK) {
       this._writableCombined()[destCol] = src._combined[srcCol];
     }
-    if (src._extendedAttrs && (src._styleBg[src._styleIds[srcCol]] & BgFlags.HAS_EXTENDED)) {
-      this._writableExtendedAttrs()[destCol] = src._extendedAttrs[srcCol];
+    if (src._styleBg[src._styleIds[srcCol]] & BgFlags.HAS_EXTENDED) {
+      const extended = src._extendedAttrs?.[srcCol];
+      if (extended) {
+        this._writableExtendedAttrs()[destCol] = extended;
+      } else if (this._extendedAttrs) {
+        delete this._extendedAttrs[destCol];
+      }
     }
   }
 
@@ -906,7 +939,7 @@ export class BufferLine implements IBufferLine {
     if (srcExtendedAttrs) {
       for (const key in srcExtendedAttrs) {
         const i = +key;
-        if (i < line.length && (line._styleBg[line._styleIds[i]] & BgFlags.HAS_EXTENDED)) {
+        if (i < line.length && srcExtendedAttrs[i] && (line._styleBg[line._styleIds[i]] & BgFlags.HAS_EXTENDED)) {
           this._writableExtendedAttrs()[i] = srcExtendedAttrs[i];
         }
       }
