@@ -108,7 +108,7 @@
 		"chai": "^6.3.0",
 		"concurrently": "^10.0.5",
 		"esbuild": "^0.28.2",
-		"eslint": "^10.11.0",
+		"eslint": "^10.12.0",
 		"eslint-plugin-jsdoc": "latest",
 		"eslint-plugin-oxlint": "^1.86.0",
 		"express": "^5.2.1",
