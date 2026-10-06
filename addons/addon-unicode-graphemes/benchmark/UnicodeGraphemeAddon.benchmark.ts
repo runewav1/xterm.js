@@ -5,11 +5,13 @@
 
 import { perfContext, before, ThroughputRuntimeCase } from 'xterm-benchmark';
 
-import { spawn } from 'node-pty';
-import { Utf8ToUtf32, stringFromCodePoint } from 'common/input/TextDecoder';
+import * as fs from 'fs';
+import * as path from 'path';
+
 import { CoreBrowserTerminal } from 'browser/CoreBrowserTerminal';
 import { UnicodeGraphemeProvider } from 'UnicodeGraphemeProvider';
 
+const TARGET_SIZE = 2_000_000;
 
 function fakedAddonLoad(terminal: any): void {
   // resembles what UnicodeGraphemesAddon.activate does under the hood
@@ -17,40 +19,57 @@ function fakedAddonLoad(terminal: any): void {
   terminal.unicodeService.activeVersion = '15-graphemes';
 }
 
+/**
+ * Builds a realistic, ANSI colored recursive directory listing to feed into the
+ * terminal. This replaces the previous `ls -lR /usr/lib` dependency, which does
+ * not exist on Windows (the target platform of this build).
+ */
+function buildListing(): string {
+  const root = path.resolve(__dirname, '../../../../src');
+  const lines: string[] = [];
+  const walk = (dir: string): void => {
+    lines.push(`\x1b[1;34m${path.relative(root, dir) || '.'}\x1b[0m:`);
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      let size = 0;
+      try {
+        size = fs.statSync(path.join(dir, entry.name)).size;
+      } catch {
+        // ignore unreadable entries
+      }
+      const isDir = entry.isDirectory();
+      const mode = isDir ? 'drwxr-xr-x' : '-rw-r--r--';
+      const color = isDir ? '\x1b[1;34m' : entry.name.endsWith('.ts') ? '\x1b[32m' : '\x1b[0m';
+      lines.push(`${mode} 1 user group ${String(size).padStart(8)} Jan  1 00:00 ${color}${entry.name}\x1b[0m`);
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        walk(path.join(dir, entry.name));
+      }
+    }
+  };
+  walk(root);
+  if (lines.length === 0) {
+    throw new Error(`Could not build benchmark content from ${root}`);
+  }
+  return lines.join('\r\n') + '\r\n';
+}
 
-perfContext('Terminal: ls -lR /usr/lib', () => {
+perfContext('Terminal: recursive directory listing', () => {
   let content = '';
   let contentUtf8: Uint8Array;
 
-  before(async () => {
-    // grab output from "ls -lR /usr"
-    const p = spawn('ls', ['--color=auto', '-lR', '/usr/lib'], {
-      name: 'xterm-256color',
-      cols: 80,
-      rows: 25,
-      cwd: process.env.HOME,
-      env: process.env,
-      encoding: (null as unknown as string) // needs to be fixed in node-pty
-    });
-    const chunks: Buffer[] = [];
-    let length = 0;
-    p.onData(data => {
-      chunks.push(data as unknown as Buffer);
-      length += data.length;
-    });
-    await new Promise<void>(resolve => p.onExit(() => resolve()));
-    contentUtf8 = Buffer.concat(chunks, length);
-    // translate to content string
-    const buffer = new Uint32Array(contentUtf8.length);
-    const decoder = new Utf8ToUtf32();
-    const codepoints = decoder.decode(contentUtf8, buffer);
-    for (let i = 0; i < codepoints; ++i) {
-      content += stringFromCodePoint(buffer[i]);
-      // peek into content to force flat repr in v8
-      if (!(i % 10000000)) {
-        content[i];
-      }
+  before(() => {
+    const listing = buildListing();
+    while (content.length < TARGET_SIZE) {
+      content += listing;
     }
+    contentUtf8 = Buffer.from(content, 'utf8');
   });
 
   perfContext('write/string/async', () => {

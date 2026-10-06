@@ -14,8 +14,15 @@ describe('BufferService', () => {
     const eraseAttr = new AttributeData();
 
     it('should decrement ydisp when the buffer is full and the user has scrolled up', () => {
-      const optionsService = new OptionsService({ rows: 3, cols: 10, scrollback: 2 });
-      const bufferService = new BufferService(optionsService, new MockLogService());
+      const optionsService = new OptionsService({
+        rows: 3,
+        cols: 10,
+        scrollback: 2,
+      });
+      const bufferService = new BufferService(
+        optionsService,
+        new MockLogService(),
+      );
       const buffer = bufferService.buffer;
 
       while (!buffer.lines.isFull) {
@@ -34,8 +41,15 @@ describe('BufferService', () => {
     });
 
     it('should not advance ydisp with ybase while the user has scrolled up and the buffer is not full', () => {
-      const optionsService = new OptionsService({ rows: 3, cols: 10, scrollback: 2 });
-      const bufferService = new BufferService(optionsService, new MockLogService());
+      const optionsService = new OptionsService({
+        rows: 3,
+        cols: 10,
+        scrollback: 2,
+      });
+      const bufferService = new BufferService(
+        optionsService,
+        new MockLogService(),
+      );
       const buffer = bufferService.buffer;
 
       bufferService.isUserScrolling = true;
@@ -49,8 +63,15 @@ describe('BufferService', () => {
     });
 
     it('should follow ybase with ydisp when the user is not scrolling', () => {
-      const optionsService = new OptionsService({ rows: 3, cols: 10, scrollback: 2 });
-      const bufferService = new BufferService(optionsService, new MockLogService());
+      const optionsService = new OptionsService({
+        rows: 3,
+        cols: 10,
+        scrollback: 2,
+      });
+      const bufferService = new BufferService(
+        optionsService,
+        new MockLogService(),
+      );
       const buffer = bufferService.buffer;
 
       while (!buffer.lines.isFull) {
@@ -64,12 +85,21 @@ describe('BufferService', () => {
     });
 
     it('should scroll within DECSTBM margins without affecting lines outside the region', () => {
-      const optionsService = new OptionsService({ rows: 5, cols: 10, scrollback: 10 });
-      const bufferService = new BufferService(optionsService, new MockLogService());
+      const optionsService = new OptionsService({
+        rows: 5,
+        cols: 10,
+        scrollback: 10,
+      });
+      const bufferService = new BufferService(
+        optionsService,
+        new MockLogService(),
+      );
       const buffer = bufferService.buffer;
 
       const markRow = (row: number, ch: string) => {
-        buffer.lines.get(buffer.ybase + row)!.setCellFromCodepoint(0, ch.charCodeAt(0), 1, eraseAttr);
+        buffer.lines
+          .get(buffer.ybase + row)!
+          .setCellFromCodepoint(0, ch.charCodeAt(0), 1, eraseAttr);
       };
       markRow(0, 'A');
       markRow(1, 'B');
@@ -81,24 +111,147 @@ describe('BufferService', () => {
 
       bufferService.scroll(eraseAttr);
 
-      assert.strictEqual(buffer.lines.get(buffer.ybase + 0)!.translateToString().trim(), 'A');
-      assert.strictEqual(buffer.lines.get(buffer.ybase + 1)!.translateToString().trim(), 'C');
-      assert.strictEqual(buffer.lines.get(buffer.ybase + 2)!.translateToString().trim(), 'D');
-      assert.strictEqual(buffer.lines.get(buffer.ybase + 3)!.translateToString(true).trim(), '');
-      assert.strictEqual(buffer.lines.get(buffer.ybase + 4)!.translateToString().trim(), 'E');
+      assert.strictEqual(
+        buffer.lines
+          .get(buffer.ybase + 0)!
+          .translateToString()
+          .trim(),
+        'A',
+      );
+      assert.strictEqual(
+        buffer.lines
+          .get(buffer.ybase + 1)!
+          .translateToString()
+          .trim(),
+        'C',
+      );
+      assert.strictEqual(
+        buffer.lines
+          .get(buffer.ybase + 2)!
+          .translateToString()
+          .trim(),
+        'D',
+      );
+      assert.strictEqual(
+        buffer.lines
+          .get(buffer.ybase + 3)!
+          .translateToString(true)
+          .trim(),
+        '',
+      );
+      assert.strictEqual(
+        buffer.lines
+          .get(buffer.ybase + 4)!
+          .translateToString()
+          .trim(),
+        'E',
+      );
     });
+  });
+
+  it('should keep lines independent across repeated scrolls within DECSTBM margins', () => {
+    const optionsService = new OptionsService({
+      rows: 5,
+      cols: 10,
+      scrollback: 10,
+    });
+    const bufferService = new BufferService(
+      optionsService,
+      new MockLogService(),
+    );
+    const buffer = bufferService.buffer;
+    const eraseAttr = new AttributeData();
+    const markRow = (row: number, ch: string) => {
+      buffer.lines
+        .get(buffer.ybase + row)!
+        .setCellFromCodepoint(0, ch.charCodeAt(0), 1, eraseAttr);
+    };
+    const rowText = (row: number) =>
+      buffer.lines.get(buffer.ybase + row)!.translateToString(true);
+    markRow(0, 'A');
+    markRow(4, 'E');
+    buffer.scrollTop = 1;
+    buffer.scrollBottom = 3;
+
+    for (const ch of ['F', 'G', 'H', 'I', 'J', 'K']) {
+      markRow(3, ch);
+      bufferService.scroll(eraseAttr);
+    }
+
+    assert.deepStrictEqual([0, 1, 2, 3, 4].map(rowText), [
+      'A',
+      'J',
+      'K',
+      '',
+      'E',
+    ]);
+  });
+
+  it('should scroll within a bottom margin when the buffer is full without affecting lines below the region', () => {
+    const optionsService = new OptionsService({
+      rows: 5,
+      cols: 10,
+      scrollback: 2,
+    });
+    const bufferService = new BufferService(
+      optionsService,
+      new MockLogService(),
+    );
+    const buffer = bufferService.buffer;
+    const eraseAttr = new AttributeData();
+    while (!buffer.lines.isFull) {
+      bufferService.scroll(eraseAttr);
+    }
+    const markRow = (row: number, ch: string) => {
+      buffer.lines
+        .get(buffer.ybase + row)!
+        .setCellFromCodepoint(0, ch.charCodeAt(0), 1, eraseAttr);
+    };
+    const rowText = (row: number) =>
+      buffer.lines.get(buffer.ybase + row)!.translateToString(true);
+    markRow(0, 'A');
+    markRow(1, 'B');
+    markRow(2, 'C');
+    markRow(3, 'D');
+    markRow(4, 'E');
+    buffer.scrollTop = 0;
+    buffer.scrollBottom = 3;
+
+    bufferService.scroll(eraseAttr);
+    markRow(3, 'F');
+    bufferService.scroll(eraseAttr);
+
+    assert.strictEqual(buffer.lines.length, 7);
+    assert.deepStrictEqual([-2, -1, 0, 1, 2, 3, 4].map(rowText), [
+      'A',
+      'B',
+      'C',
+      'D',
+      'F',
+      '',
+      'E',
+    ]);
   });
 
   describe('scrollLines', () => {
     it('should move ydisp and set isUserScrolling when scrolling up', () => {
-      const optionsService = new OptionsService({ rows: 10, cols: 80, scrollback: 10 });
-      const bufferService = new BufferService(optionsService, new MockLogService());
+      const optionsService = new OptionsService({
+        rows: 10,
+        cols: 80,
+        scrollback: 10,
+      });
+      const bufferService = new BufferService(
+        optionsService,
+        new MockLogService(),
+      );
       const buffer = bufferService.buffer;
       buffer.ybase = 5;
       buffer.ydisp = 5;
 
       let scrollEvent: number | undefined;
-      bufferService.onScroll(e => { scrollEvent = e; });
+      bufferService.onScroll((e) => {
+        scrollEvent = e;
+      });
 
       bufferService.scrollLines(-2);
 
@@ -108,8 +261,15 @@ describe('BufferService', () => {
     });
 
     it('should not scroll above the top of the buffer', () => {
-      const optionsService = new OptionsService({ rows: 10, cols: 80, scrollback: 10 });
-      const bufferService = new BufferService(optionsService, new MockLogService());
+      const optionsService = new OptionsService({
+        rows: 10,
+        cols: 80,
+        scrollback: 10,
+      });
+      const bufferService = new BufferService(
+        optionsService,
+        new MockLogService(),
+      );
       const buffer = bufferService.buffer;
       buffer.ybase = 5;
       buffer.ydisp = 0;
@@ -121,8 +281,15 @@ describe('BufferService', () => {
     });
 
     it('should clear isUserScrolling when scrolling to the bottom', () => {
-      const optionsService = new OptionsService({ rows: 10, cols: 80, scrollback: 10 });
-      const bufferService = new BufferService(optionsService, new MockLogService());
+      const optionsService = new OptionsService({
+        rows: 10,
+        cols: 80,
+        scrollback: 10,
+      });
+      const bufferService = new BufferService(
+        optionsService,
+        new MockLogService(),
+      );
       const buffer = bufferService.buffer;
       buffer.ybase = 5;
       buffer.ydisp = 2;
