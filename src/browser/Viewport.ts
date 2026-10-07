@@ -30,6 +30,11 @@ export class Viewport extends Disposable {
   private _suppressOnScrollHandler: boolean = false;
   private _needsSyncOnRender: boolean = false;
 
+  private _screenElement: HTMLElement;
+  private _pixelOffset: number = 0;
+  /** Last device-pixel-rounded offset written, to skip redundant style writes. */
+  private _appliedPixelOffset: number = 0;
+
   constructor(
     element: HTMLElement,
     screenElement: HTMLElement,
@@ -81,6 +86,8 @@ export class Viewport extends Disposable {
     element.appendChild(this._scrollableElement.getDomNode());
     this._register(toDisposable(() => this._scrollableElement.getDomNode().remove()));
 
+    this._screenElement = screenElement;
+    screenElement.style.willChange = 'transform';
     this._styleElement = coreBrowserService.mainDocument.createElement('style');
     screenElement.appendChild(this._styleElement);
     this._register(toDisposable(() => this._styleElement.remove()));
@@ -98,12 +105,20 @@ export class Viewport extends Disposable {
       ].join('\n');
     }));
 
-    this._register(this._bufferService.onResize(() => this.queueSync()));
+    this._register(this._bufferService.onResize(() => {
+      // A resize changes the cell height; an offset computed against the old
+      // height is no longer meaningful and would leave the viewport misaligned.
+      this._pixelOffset = 0;
+      this._applyPixelOffset();
+      this.queueSync();
+    }));
     this._register(this._bufferService.buffers.onBufferActivate(() => {
       // Reset _latestYDisp when switching buffers to prevent stale scroll position
       // from alt buffer contaminating normal buffer scroll position
       this._latestYDisp = undefined;
       this._pendingYDisp = undefined;
+      this._pixelOffset = 0;
+      this._applyPixelOffset();
       this.queueSync();
     }));
     // Emulation still processes every scroll synchronously. Only scrollbar/DOM
@@ -233,7 +248,8 @@ export class Viewport extends Disposable {
       return;
     }
     this._isHandlingScroll = true;
-    const newRow = Math.round(e.scrollTop / this._renderService.dimensions.css.cell.height);
+    const cellHeight = this._renderService.dimensions.css.cell.height;
+    const newRow = Math.round(e.scrollTop / cellHeight);
     const diff = newRow - this._bufferService.buffer.ydisp;
     if (diff !== 0) {
       this._latestYDisp = newRow;
@@ -242,7 +258,28 @@ export class Viewport extends Disposable {
       if (this._queuedAnimationFrame !== undefined) this._pendingYDisp = newRow;
       this._onRequestScrollLines.fire(diff);
     }
+    // Preserve sub-row motion between row-aligned scroll positions.
+    this._pixelOffset = newRow * cellHeight - e.scrollTop;
+    this._applyPixelOffset();
     this._isHandlingScroll = false;
+  }
+
+  // Round to device pixels to avoid canvas blur.
+  private _applyPixelOffset(): void {
+    const el = this._screenElement;
+    if (!el) {
+      return;
+    }
+    const win = el.ownerDocument && el.ownerDocument.defaultView;
+    const dpr = (win && win.devicePixelRatio) || 1;
+    const offset = Math.round((this._pixelOffset || 0) * dpr) / dpr;
+    // Skip redundant writes (and string allocation) when the rounded offset is
+    // unchanged, which is common during momentum scrolling.
+    if (offset === this._appliedPixelOffset) {
+      return;
+    }
+    this._appliedPixelOffset = offset;
+    el.style.transform = offset ? `translateY(${offset}px)` : '';
   }
 
   public handleTouchScroll(translationY: number): void {

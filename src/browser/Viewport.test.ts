@@ -111,3 +111,72 @@ describe('Viewport deferred sync', () => {
     assert.isFalse(f.internal._needsSyncOnRender);
   });
 });
+
+describe('Viewport sub-row pixel offset', () => {
+  // Minimal viewport exercising only _handleScroll/_applyPixelOffset, with a
+  // screen element whose transform writes are counted.
+  function offsetFixture(dpr: number): any {
+    const viewport = Object.create(Viewport.prototype) as Viewport;
+    const internal = viewport as any;
+    const buffer = { ydisp: 0, lines: { length: 1000 } };
+    let transform = '';
+    let writes = 0;
+    const style: any = {};
+    Object.defineProperty(style, 'transform', {
+      get: () => transform,
+      set: (value: string) => { transform = value; writes++; }
+    });
+    const screenElement = {
+      style,
+      ownerDocument: { defaultView: { devicePixelRatio: dpr } }
+    };
+    internal._bufferService = { buffer };
+    internal._coreService = { decPrivateModes: { synchronizedOutput: false } };
+    internal._renderService = {
+      dimensions: { css: { cell: { height: 10 }, canvas: { height: 400 } } }
+    };
+    internal._screenElement = screenElement;
+    internal._pixelOffset = 0;
+    internal._appliedPixelOffset = 0;
+    internal._onRequestScrollLines = new Emitter<number>();
+    internal._onRequestScrollLines.event((delta: number) => { buffer.ydisp += delta; });
+    return {
+      buffer,
+      transform: () => transform,
+      writes: () => writes,
+      handleScroll: (scrollTop: number) => internal._handleScroll({ scrollTop })
+    };
+  }
+
+  it('applies the sub-row offset as a device-pixel-rounded translate', () => {
+    const f = offsetFixture(1);
+    // newRow = round(15/10) = 2, offset = 20 - 15 = 5
+    f.handleScroll(15);
+    assert.equal(f.transform(), 'translateY(5px)');
+  });
+
+  it('rounds the offset to whole device pixels', () => {
+    const f = offsetFixture(2);
+    // newRow = 2, offset = 2.5 -> round(5)/2 = 2.5
+    f.handleScroll(17.5);
+    assert.equal(f.transform(), 'translateY(2.5px)');
+  });
+
+  it('does not rewrite the transform for an unchanged rounded offset', () => {
+    const f = offsetFixture(2);
+    f.handleScroll(17.4); // offset 2.6 -> rounds to 2.5
+    assert.equal(f.writes(), 1);
+    f.handleScroll(17.5); // offset 2.5 -> same rounded value
+    assert.equal(f.writes(), 1);
+    assert.equal(f.transform(), 'translateY(2.5px)');
+  });
+
+  it('clears the transform when the viewport returns to a row-aligned position', () => {
+    const f = offsetFixture(2);
+    f.handleScroll(17.5);
+    assert.equal(f.transform(), 'translateY(2.5px)');
+    f.handleScroll(20); // offset 0
+    assert.equal(f.transform(), '');
+    assert.equal(f.writes(), 2);
+  });
+});
