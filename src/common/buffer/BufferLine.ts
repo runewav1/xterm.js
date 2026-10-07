@@ -435,6 +435,21 @@ export class BufferLine implements IBufferLine {
     return cell;
   }
 
+  /**
+   * Convenience wrapper around loadCell, used by public API.
+   */
+  public getCell(x: number, cell?: ICellData): ICellData | undefined {
+    if (x < 0 || x >= this.length) {
+      return undefined;
+    }
+
+    if (cell) {
+      this.loadCell(x, cell);
+      return cell;
+    }
+    return this.loadCell(x, new CellData());
+  }
+
   public getExtended(index: number): IExtendedAttrs {
     if (this._styleBg[this._styleIds[index]] & BgFlags.HAS_EXTENDED) {
       const extended = this._extendedAttrs?.[index];

@@ -5,7 +5,6 @@
 
 import { IBuffer as IBufferApi, IBufferLine as IBufferLineApi, IBufferCell as IBufferCellApi } from '@xterm/xterm';
 import { IBuffer } from '../buffer/Types';
-import { BufferLineApiView } from './BufferLineApiView';
 import { CellData } from '../buffer/CellData';
 
 export class BufferApiView implements IBufferApi {
@@ -29,7 +28,7 @@ export class BufferApiView implements IBufferApi {
     if (!line) {
       return undefined;
     }
-    return new BufferLineApiView(line);
+    return line && line as unknown as IBufferLineApi;
   }
   public getNullCell(): IBufferCellApi { return new CellData(); }
 }
